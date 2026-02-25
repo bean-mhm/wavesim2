@@ -1,0 +1,11 @@
+[project]
+name = "wavesim2"
+version = "0.1.0"
+description = "https://github.com/bean-mhm/wavesim2"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "glfw>=2.10.0",
+    "rendercanvas>=2.6.1",
+    "wgpu>=0.30.0",
+]
