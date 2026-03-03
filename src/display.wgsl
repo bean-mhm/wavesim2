@@ -1,9 +1,9 @@
-struct Params {
+struct UniformBuf {
     srgb_surface: vec4i, // if surface format applies sRGB OETF internally
 };
 
 @group(0) @binding(0)
-var<uniform> params: Params;
+var<uniform> ubo: UniformBuf;
 
 @group(0) @binding(1)
 var render_target: texture_2d<f32>;
@@ -30,6 +30,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     var out: VsOut;
     out.pos = vec4f(pos[vid], 0., 1.);
     out.uv = pos[vid] * .5 + .5;
+    out.uv.y = 1. - out.uv.y;
     return out;
 }
 
@@ -55,8 +56,12 @@ fn srgb_to_linear_bt709_id65(v_in: vec3f) -> vec3f {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
-    var col = textureSample(render_target, linear_sampler, in.uv).rgb;
-    if (params.srgb_surface[0] != 0)
+    var col = textureSample(
+        render_target,
+        linear_sampler,
+        in.uv
+    ).rgb;
+    if (ubo.srgb_surface[0] != 0)
     {
         col = srgb_to_linear_bt709_id65(col);
     }
