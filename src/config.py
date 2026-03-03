@@ -6,6 +6,10 @@ RENDER_RES = (2160, 1080)
 DISPLAY_SCALE = .6
 WINDOW_TITLE = "wavesim2 (time: {:.3f}, iter: {})"
 
+# store source code for shaders with replacements applied. useful for debugging,
+# especially when we need to go to a certain line number.
+STORE_RESOLVED_SHADER_CODE = True
+
 
 class WaveSimState:
     # current iteration
@@ -25,7 +29,7 @@ class WaveSimState:
         self.time = 0.
         self.use_a_as_input = True
         self.timestep = timestep
-    
+
     def advance(self, n_steps: int = 1):
         for _ in range(n_steps):
             self.use_a_as_input = not self.use_a_as_input
@@ -76,28 +80,44 @@ class WaveSimParams(NamedTuple):
     update_value_function: str
 
     # NOTE:
-    # the following uniform values are accessible in the WGSL functions above:
+    # the following constants and uniform values are accessible in the WGSL
+    # functions above:
+    #
+    # math constants
+    #   PI, TAU, HALF_PI: f32
     #
     # simulation grid resolution
-    #   ubo.grid_res: vec3i
+    #   GRID_RES: vec3i
     #
     # simulation grid cell (voxel) size
-    #   ubo.cell_size: f32
+    #   CELL_SIZE: f32
     #
     # dimensions of the simulation grid (cell_size * grid_res)
-    #   ubo.grid_dims: vec3f
+    #   GRID_DIMS: vec3f
     #
     # wave propagation speed
-    #   ubo.wave_speed: f32
+    #   WAVE_SPEED: f32
     #
     # remove reflections at the grid boundaries
-    #   ubo.remove_reflections: bool
+    #   REMOVE_REFLECTIONS: bool
     #
     # dampening factor per second (stiff near zero and loose at 1)
-    #   ubo.damp_fac: f32
+    #   DAMP_FAC: f32
+    #
+    # dampening factor per timestep
+    #   DAMP_FAC_PER_DT: f32
     #
     # resolved timestep
-    #   ubo.timestep: f32
+    #   TIMESTEP: f32
+    #
+    # maximum stable timestep
+    #   MAX_TIMESTEP: f32
+    #
+    # minimum stable wavelength
+    #   MIN_WAVELENGTH: f32
+    #
+    # maximum stable frequency
+    #   MAX_FREQ: f32
     #
     # simulation iteration
     #   ubo.iter: i32
@@ -105,17 +125,8 @@ class WaveSimParams(NamedTuple):
     # simulation time
     #   ubo.time: f32
     #
-    # maximum stable timestep
-    #   ubo.max_timestep: f32
-    #
-    # minimum stable wavelength
-    #   ubo.min_wavelength: f32
-    #
-    # maximum stable frequency
-    #   ubo.max_freq: f32
-    #
     # used internally for removing reflections at the grid boundaries
-    #   ubo.impedance_matching_coefficient: f32
+    #   IMPEDANCE_MATCHING_COEFFICIENT: f32
     #
     # this is the data stored in every cell:
     #   struct WaveValue {
@@ -143,6 +154,10 @@ class WaveSimParams(NamedTuple):
 
     # rendering: step size jitter for ray marching
     render_raymarch_step_jitter: float
+
+    # rendering: use trilinear interpolation/filtering for sampling the
+    # simulation grid instead of nearest-neighbor.
+    render_use_trilinear: bool
 
     # rendering: Python function returning the camera state per frame
     render_camera_function: Callable[
@@ -213,8 +228,8 @@ fn initial_value(icoord: vec3i) -> WaveValue {
     update_value_function="""
 fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     // initial pulse at the center
-    if (all(icoord == ubo.grid_res / 2)) {
-        let freq = .9 * ubo.max_freq;
+    if (all(icoord == GRID_RES / 2)) {
+        let freq = .9 * MAX_FREQ;
         return 10. * sin(TAU * ubo.time * freq);
     }
     return v.curr;
@@ -227,6 +242,7 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     render_n_samples_per_pixel=4,
     render_raymarch_step=.018,
     render_raymarch_step_jitter=.015,
+    render_use_trilinear=True,
     render_camera_function=lambda params, limits, state:
     CameraState(
         pos=(0., -1.25, .03),

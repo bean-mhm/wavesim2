@@ -1,75 +1,16 @@
-struct UniformBufRaw {
-    d0: vec4f,
-    d1: vec4f,
-    d2: vec4f,
-    d3: vec4f,
-    d4: vec4f,
-};
+// the following will be replaced with constants
+// [constants]
 
 struct UniformBuf {
-    // simulation grid resolution
-    grid_res: vec3i,
-
-    // simulation grid cell (voxel) size
-    cell_size: f32,
-
-    // dimensions of the simulation grid
-    grid_dims: vec3f,
-
-    // wave propagation speed
-    wave_speed: f32,
-
-    // remove reflections at the grid boundaries
-    remove_reflections: bool,
-
-    // dampening factor per second (stiff near zero and loose at 1)
-    damp_fac: f32,
-
-    // delta time
-    timestep: f32,
-
     // simulation iteration
     iter: i32,
 
     // simulation time
     time: f32,
-
-    // maximum stable timestep
-    max_timestep: f32,
-
-    // minimum stable wavelength
-    min_wavelength: f32,
-
-    // maximum stable frequency
-    max_freq: f32,
-
-    // used internally for removing reflections at the grid boundaries
-    impedance_matching_coefficient: f32,
 };
 
 @group(0) @binding(0)
-var<uniform> ubo_raw: UniformBufRaw;
-var<private> ubo: UniformBuf;
-
-fn extract_uniforms() {
-    ubo.grid_res = vec3i(
-        bitcast<i32>(ubo_raw.d0.x),
-        bitcast<i32>(ubo_raw.d0.y),
-        bitcast<i32>(ubo_raw.d0.z)
-    );
-    ubo.cell_size = ubo_raw.d0.w;
-    ubo.grid_dims = ubo_raw.d1.xyz;
-    ubo.wave_speed = ubo_raw.d1.w;
-    ubo.remove_reflections = (bitcast<i32>(ubo_raw.d2.x) != 0);
-    ubo.damp_fac = ubo_raw.d2.y;
-    ubo.timestep = ubo_raw.d2.z;
-    ubo.iter = bitcast<i32>(ubo_raw.d2.w);
-    ubo.time = ubo_raw.d3.x;
-    ubo.max_timestep = ubo_raw.d3.y;
-    ubo.min_wavelength = ubo_raw.d3.z;
-    ubo.max_freq = ubo_raw.d3.w;
-    ubo.impedance_matching_coefficient = ubo_raw.d4.x;
-}
+var<uniform> ubo: UniformBuf;
 
 @group(0) @binding(1)
 var input_grid: texture_storage_3d<rg32float, read>;
@@ -221,12 +162,10 @@ fn grid_write(icoord: vec3i, v: WaveValue) {
 
 @compute @workgroup_size(8, 8, 4)
 fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
-    extract_uniforms();
     let icoord = vec3i(gid_u);
-
-    if (icoord.x >= ubo.grid_res.x ||
-        icoord.y >= ubo.grid_res.y ||
-        icoord.z >= ubo.grid_res.z) {
+    if (icoord.x >= GRID_RES.x ||
+        icoord.y >= GRID_RES.y ||
+        icoord.z >= GRID_RES.z) {
         return;
     }
 
@@ -242,22 +181,22 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
     // the boundary face. I genuinely have no clue how this works and I frankly
     // got help from an LLM. sue me.
     // https://chatgpt.com/share/6995fcad-7f98-800b-91c2-d86b4f1551ac
-    if (ubo.remove_reflections) {
+    if (REMOVE_REFLECTIONS) {
         var boundary: bool = false;
         if (icoord.x == 0) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(1, 0, 0));
             v.curr =
                 neighbor.prev
-                + ubo.impedance_matching_coefficient
+                + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
-        if (icoord.x == ubo.grid_res.x - 1) {
+        if (icoord.x == GRID_RES.x - 1) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(1, 0, 0));
             v.curr =
                 neighbor.prev
-                + ubo.impedance_matching_coefficient
+                + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
         if (icoord.y == 0) {
@@ -265,15 +204,15 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
             let neighbor = grid_fetch(icoord + vec3i(0, 1, 0));
             v.curr =
                 neighbor.prev
-                + ubo.impedance_matching_coefficient
+                + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
-        if (icoord.y == ubo.grid_res.y - 1) {
+        if (icoord.y == GRID_RES.y - 1) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(0, 1, 0));
             v.curr =
                 neighbor.prev
-                + ubo.impedance_matching_coefficient
+                + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
         if (icoord.z == 0) {
@@ -281,15 +220,15 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
             let neighbor = grid_fetch(icoord + vec3i(0, 0, 1));
             v.curr =
                 neighbor.prev
-                + ubo.impedance_matching_coefficient
+                + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
-        if (icoord.z == ubo.grid_res.z - 1) {
+        if (icoord.z == GRID_RES.z - 1) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(0, 0, 1));
             v.curr =
                 neighbor.prev
-                + ubo.impedance_matching_coefficient
+                + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
 
@@ -308,19 +247,19 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
     var prev_in_y = 0.;
     var next_in_z = 0.;
     var prev_in_z = 0.;
-    if ((icoord.x + 1) < ubo.grid_res.x) {
+    if ((icoord.x + 1) < GRID_RES.x) {
         next_in_x = grid_fetch(icoord + vec3i(1, 0, 0)).curr;
     }
     if ((icoord.x - 1) >= 0) {
         prev_in_x = grid_fetch(icoord + vec3i(-1, 0, 0)).curr;
     }
-    if ((icoord.y + 1) < ubo.grid_res.y) {
+    if ((icoord.y + 1) < GRID_RES.y) {
         next_in_y = grid_fetch(icoord + vec3i(0, 1, 0)).curr;
     }
     if ((icoord.y - 1) >= 0) {
         prev_in_y = grid_fetch(icoord + vec3i(0, -1, 0)).curr;
     }
-    if ((icoord.z + 1) < ubo.grid_res.z) {
+    if ((icoord.z + 1) < GRID_RES.z) {
         next_in_z = grid_fetch(icoord + vec3i(0, 0, 1)).curr;
     }
     if ((icoord.z - 1) >= 0) {
@@ -335,17 +274,17 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
     // d2u/dt2
     let acc =
         (grad_x + grad_y + grad_z)  // Laplacian
-        * (ubo.wave_speed * ubo.wave_speed)  // c^2
-        / (ubo.cell_size * ubo.cell_size);  // dx^2
+        * (WAVE_SPEED * WAVE_SPEED)  // c^2
+        / (CELL_SIZE * CELL_SIZE);  // dx^2
 
     // du/dt
-    var vel = (v.curr - v.prev) / ubo.timestep;
-    vel += (acc * ubo.timestep);
-    vel *= pow(ubo.damp_fac, ubo.timestep);
+    var vel = (v.curr - v.prev) / TIMESTEP;
+    vel += (acc * TIMESTEP);
+    vel *= DAMP_FAC_PER_DT;
 
     // u
     v.prev = v.curr;
-    v.curr += (vel * ubo.timestep);
+    v.curr += (vel * TIMESTEP);
 
     // custom excitations
     v.curr = update_value(icoord, v);

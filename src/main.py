@@ -10,17 +10,26 @@ from config import *
 
 def load_shader(
     device: wgpu.GPUDevice,
-    filename: str = 'shader.wgsl',
+    filename: str = "shader.wgsl",
     replacements: list[tuple[str, str]] = []
 ) -> wgpu.GPUShaderModule:
 
     path = Path(__file__).parent / filename
     if not path.exists():
-        raise FileNotFoundError(f'shader source file {path} is missing')
+        raise FileNotFoundError(f"shader source file {path} is missing")
 
     code = path.read_text()
     for replacement in replacements:
         code = code.replace(replacement[0], replacement[1])
+
+    # store the version with replacements applied (useful for debugging)
+    if STORE_RESOLVED_SHADER_CODE:
+        resolved_path = \
+            Path(__file__).parent / ".debug" / ("resolved_" + filename)
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(resolved_path, "w") as f:
+            f.write(code)
+            f.close()
 
     return device.create_shader_module(code=code)
 
@@ -133,17 +142,73 @@ def main():
     context.configure(device=device, format=surface_format)
 
     # shaders
+
     sim_shader = load_shader(
         device,
-        'sim.wgsl',
-        [(
-            "// [user-functions]",
-            selected_sim_params.initial_value_function +
-            selected_sim_params.update_value_function
-        )]
+        "sim.wgsl",
+        [
+            (
+                "// [constants]",
+                f"""
+const GRID_RES = vec3i{str(selected_sim_params.grid_res)};
+const CELL_SIZE = {selected_sim_params.cell_size};
+const GRID_DIMS = vec3f{str(selected_sim_limits.grid_dims)};
+const WAVE_SPEED = {selected_sim_params.wave_speed};
+const REMOVE_REFLECTIONS = {str(selected_sim_params.remove_reflections).lower()};
+const DAMP_FAC = {selected_sim_params.damp_fac};
+const DAMP_FAC_PER_DT = {selected_sim_params.damp_fac ** selected_sim_limits.resolved_timestep};
+const TIMESTEP = {selected_sim_limits.resolved_timestep};
+const MAX_TIMESTEP = {selected_sim_limits.max_timestep};
+const MIN_WAVELENGTH = {selected_sim_limits.min_wavelength};
+const MAX_FREQ = {selected_sim_limits.max_freq};
+const IMPEDANCE_MATCHING_COEFFICIENT = {selected_sim_limits.impedance_matching_coefficient};
+                """
+            ),
+            (
+                "// [user-functions]",
+                selected_sim_params.initial_value_function +
+                selected_sim_params.update_value_function
+            )
+        ]
     )
-    render_shader = load_shader(device, 'render.wgsl')
-    display_shader = load_shader(device, 'display.wgsl')
+
+    render_shader = load_shader(
+        device,
+        "render.wgsl",
+        [
+            (
+                "// [constants]",
+                f"""
+const RES = vec2i{str(RENDER_RES)};
+const BG_COL = vec3f{str(selected_sim_params.render_bg_col)};
+const TINT_POSITIVE = vec3f{str(selected_sim_params.render_tint_positive)};
+const TINT_NEGATIVE = vec3f{str(selected_sim_params.render_tint_negative)};
+const BRIGHTNESS = {selected_sim_params.render_brightness};
+const N_SAMPLES_PER_PIXEL = {selected_sim_params.render_n_samples_per_pixel};
+const RAYMARCH_STEP = {selected_sim_params.render_raymarch_step};
+const RAYMARCH_STEP_JITTER = {selected_sim_params.render_raymarch_step_jitter};
+const USE_TRILINEAR = {str(selected_sim_params.render_use_trilinear).lower()};
+const APPLY_FLIM = {str(selected_sim_params.render_apply_flim).lower()};
+const SIM_GRID_RES = vec3i{str(selected_sim_params.grid_res)};
+const SIM_GRID_DIMS = vec3f{str(selected_sim_limits.grid_dims)};
+                """
+            )
+        ]
+    )
+
+    display_shader = load_shader(
+        device,
+        "display.wgsl",
+        [
+            (
+                "// [constants]",
+                f"""
+// if surface format applies sRGB OETF internally
+const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
+                """
+            )
+        ]
+    )
 
     # create double buffered 3D textures for the simulation
 
@@ -193,40 +258,11 @@ def main():
     # uniform buffer for compute pipeline
 
     sim_uniform_dtype = np.dtype([
-        ("grid_res", np.int32, (3,)),
-        ("cell_size", np.float32),
-        ("grid_dims", np.float32, (3,)),
-        ("wave_speed", np.float32),
-        ("remove_reflections", np.int32),
-        ("damp_fac", np.float32),
-        ("timestep", np.float32),
         ("iter", np.int32),
         ("time", np.float32),
-        ("max_timestep", np.float32),
-        ("min_wavelength", np.float32),
-        ("max_freq", np.float32),
-        ("impedance_matching_coefficient", np.float32),
-        ("_pad", np.int32, (3,)),
     ])
 
     sim_uniform = np.zeros((), dtype=sim_uniform_dtype)
-    sim_uniform["grid_res"] = selected_sim_params.grid_res
-    sim_uniform["cell_size"] = selected_sim_params.cell_size
-    sim_uniform["grid_dims"] = selected_sim_limits.grid_dims
-    sim_uniform["wave_speed"] = selected_sim_params.wave_speed
-    sim_uniform["remove_reflections"] = int(
-        selected_sim_params.remove_reflections
-    )
-    sim_uniform["damp_fac"] = selected_sim_params.damp_fac
-    sim_uniform["timestep"] = selected_sim_limits.resolved_timestep
-    sim_uniform["iter"] = 0
-    sim_uniform["time"] = 0.
-    sim_uniform["max_timestep"] = selected_sim_limits.max_timestep
-    sim_uniform["min_wavelength"] = selected_sim_limits.min_wavelength
-    sim_uniform["max_freq"] = selected_sim_limits.max_freq
-    sim_uniform["impedance_matching_coefficient"] = \
-        selected_sim_limits.impedance_matching_coefficient
-
     sim_uniform_buffer = DynamicUniformBuffer(
         device=device,
         label="sim_uniform_buffer",
@@ -237,55 +273,19 @@ def main():
     # uniform buffer for render pipeline
 
     render_uniform_dtype = np.dtype([
-        ("res", np.int32, (2,)),
-        ("bg_col", np.float32, (3,)),
-        ("tint_positive", np.float32, (3,)),
-        ("tint_negative", np.float32, (3,)),
-        ("brightness", np.float32),
-        ("n_samples_per_pixel", np.int32),
-        ("raymarch_step", np.float32),
-        ("raymarch_step_jitter", np.float32),
         ("cam_pos", np.float32, (3,)),
         ("cam_lookat", np.float32, (3,)),
         ("cam_world_up", np.float32, (3,)),
         ("cam_fov_degrees", np.float32),
-        ("apply_flim", np.int32),
-        ("sim_grid_res", np.int32, (3,)),
-        ("sim_grid_dims", np.float32, (3,)),
+        ("_pad", np.int32, (2,)),
     ])
 
     render_uniform = np.zeros((), dtype=render_uniform_dtype)
-    render_uniform["res"] = RENDER_RES
-    render_uniform["bg_col"] = selected_sim_params.render_bg_col
-    render_uniform["tint_positive"] = selected_sim_params.render_tint_positive
-    render_uniform["tint_negative"] = selected_sim_params.render_tint_negative
-    render_uniform["brightness"] = selected_sim_params.render_brightness
-    render_uniform["n_samples_per_pixel"] = selected_sim_params.render_n_samples_per_pixel
-    render_uniform["raymarch_step"] = selected_sim_params.render_raymarch_step
-    render_uniform["raymarch_step_jitter"] = selected_sim_params.render_raymarch_step_jitter
-    render_uniform["apply_flim"] = int(selected_sim_params.render_apply_flim)
-    render_uniform["sim_grid_res"] = selected_sim_params.grid_res
-    render_uniform["sim_grid_dims"] = selected_sim_limits.grid_dims
-
     render_uniform_buffer = DynamicUniformBuffer(
         device=device,
         label="render_uniform_buffer",
         data=memoryview(render_uniform),
         upload_at_creation=True
-    )
-
-    # uniform buffer for display pipeline
-
-    display_uniform_dtype = np.dtype([
-        ("srgb_surface", np.int32, (4,)),
-    ])
-
-    display_uniform = np.zeros((), dtype=display_uniform_dtype)
-    display_uniform["srgb_surface"][0] = int('srgb' in surface_format.lower())
-
-    display_uniform_buffer = device.create_buffer_with_data(
-        data=display_uniform,
-        usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,
     )
 
     # bind group layouts
@@ -342,15 +342,10 @@ def main():
             wgpu.BindGroupLayoutEntry(
                 binding=0,
                 visibility=wgpu.ShaderStage.FRAGMENT,
-                buffer=wgpu.BufferBindingLayout()
-            ),
-            wgpu.BindGroupLayoutEntry(
-                binding=1,
-                visibility=wgpu.ShaderStage.FRAGMENT,
                 texture=wgpu.TextureBindingLayout()
             ),
             wgpu.BindGroupLayoutEntry(
-                binding=2,
+                binding=1,
                 visibility=wgpu.ShaderStage.FRAGMENT,
                 sampler=wgpu.SamplerBindingLayout()
             ),
@@ -541,14 +536,10 @@ def main():
             entries=[
                 wgpu.BindGroupEntry(
                     binding=0,
-                    resource=wgpu.BufferBinding(buffer=display_uniform_buffer)
-                ),
-                wgpu.BindGroupEntry(
-                    binding=1,
                     resource=render_target_view
                 ),
                 wgpu.BindGroupEntry(
-                    binding=2,
+                    binding=1,
                     resource=linear_sampler
                 ),
             ],

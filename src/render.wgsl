@@ -1,30 +1,17 @@
+// the following will be replaced with constants
+// [constants]
+
 struct UniformBufRaw {
     d0: vec4f,
     d1: vec4f,
     d2: vec4f,
-    d3: vec4f,
-    d4: vec4f,
-    d5: vec4f,
-    d6: vec4f,
-    d7: vec4f,
 };
 
 struct UniformBuf {
-    res: vec2i,
-    bg_col: vec3f,
-    tint_positive: vec3f,
-    tint_negative: vec3f,
-    brightness: f32,
-    n_samples_per_pixel: i32,
-    raymarch_step: f32,
-    raymarch_step_jitter: f32,
     cam_pos: vec3f,
     cam_lookat: vec3f,
     cam_world_up: vec3f,
     cam_fov_degrees: f32,
-    apply_flim: bool,
-    sim_grid_res: vec3i,
-    sim_grid_dims: vec3f
 };
 
 @group(0) @binding(0)
@@ -33,28 +20,10 @@ var<private> ubo: UniformBuf;
 
 fn extract_uniforms() {
     // extract uniform data (i hate stupid padding rules)
-    ubo.res = vec2i(
-        bitcast<i32>(ubo_raw.d0.x),
-        bitcast<i32>(ubo_raw.d0.y)
-    );
-    ubo.bg_col = vec3f(ubo_raw.d0.zw, ubo_raw.d1.x);
-    ubo.tint_positive = ubo_raw.d1.yzw;
-    ubo.tint_negative = ubo_raw.d2.xyz;
-    ubo.brightness = ubo_raw.d2.w;
-    ubo.n_samples_per_pixel = bitcast<i32>(ubo_raw.d3.x);
-    ubo.raymarch_step = ubo_raw.d3.y;
-    ubo.raymarch_step_jitter = ubo_raw.d3.z;
-    ubo.cam_pos = vec3f(ubo_raw.d3.w, ubo_raw.d4.xy);
-    ubo.cam_lookat = vec3f(ubo_raw.d4.zw, ubo_raw.d5.x);
-    ubo.cam_world_up = ubo_raw.d5.yzw;
-    ubo.cam_fov_degrees = ubo_raw.d6.x;
-    ubo.apply_flim = bitcast<i32>(ubo_raw.d6.y) != 0;
-    ubo.sim_grid_res = vec3i(
-        bitcast<i32>(ubo_raw.d6.z),
-        bitcast<i32>(ubo_raw.d6.w),
-        bitcast<i32>(ubo_raw.d7.x)
-    );
-    ubo.sim_grid_dims = ubo_raw.d7.yzw;
+    ubo.cam_pos = ubo_raw.d0.xyz;
+    ubo.cam_lookat = vec3f(ubo_raw.d0.w, ubo_raw.d1.xy);
+    ubo.cam_world_up = vec3f(ubo_raw.d1.zw, ubo_raw.d2.x);
+    ubo.cam_fov_degrees = ubo_raw.d2.y;
 }
 
 @group(0) @binding(1)
@@ -1014,26 +983,30 @@ fn flim(col_: vec3f, convert_to_srgb: bool) -> vec3f {
 /*________________ end of flim ________________*/
 
 fn screen_to_uv(frag_coord: vec2f) -> vec2f {
-    return (2. * frag_coord - vec2f(ubo.res)) /
-           f32(min(ubo.res.x, ubo.res.y));
+    return (2. * frag_coord - vec2f(RES)) /
+           f32(min(RES.x, RES.y));
 }
 
 fn sample_grid(p: vec3f) -> f32 {
     // de-center and normalize to [0, 1]
-    let p_norm = p / ubo.sim_grid_dims + .5;
+    let p_norm = p / SIM_GRID_DIMS + .5;
 
     // get 3D integer coordinates in the grid
     let icoord = vec3i(floor(
-        p_norm * vec3f(ubo.sim_grid_res)
+        p_norm * vec3f(SIM_GRID_RES)
     ));
 
     // handle out-of-bounds
-    if (any(icoord < vec3i(0)) || any(icoord >= ubo.sim_grid_res)) {
+    if (any(icoord < vec3i(0)) || any(icoord >= SIM_GRID_RES)) {
         return 0.;
     }
 
-    // TODO: use trilinear interpolation instead of nearest neighbor
-    return textureLoad(render_grid, icoord).x;
+    if (USE_TRILINEAR) {
+        // TODO
+        return textureLoad(render_grid, icoord).x;
+    } else {
+        return textureLoad(render_grid, icoord).x;
+    }
 }
 
 fn render(frag_coord: vec2f) -> vec3f {
@@ -1058,8 +1031,8 @@ fn render(frag_coord: vec2f) -> vec3f {
 
     // intersect container box
     var hit = ray_aabb(
-        -.5 * ubo.sim_grid_dims,
-        .5 * ubo.sim_grid_dims,
+        -.5 * SIM_GRID_DIMS,
+        .5 * SIM_GRID_DIMS,
         ray
     );
 
@@ -1068,8 +1041,8 @@ fn render(frag_coord: vec2f) -> vec3f {
     if (hit.hit) {
         // initial t along the ray
         var step_size =
-            ubo.raymarch_step
-            + ubo.raymarch_step_jitter
+            RAYMARCH_STEP
+            + RAYMARCH_STEP_JITTER
             * (hash_3ff(vec3f(frag_coord, -777.)) - .5);
         var t = hit.tmin + step_size;
 
@@ -1089,44 +1062,44 @@ fn render(frag_coord: vec2f) -> vec3f {
             if (false) {
                 col += colormap(10. * v * v) * step_size;
             } else {
-                var final_tint = ubo.tint_positive;
+                var final_tint = TINT_POSITIVE;
                 if (v < 0.) {
                     v = -v;
-                    final_tint = ubo.tint_negative;
+                    final_tint = TINT_NEGATIVE;
                 }
                 col += v * final_tint * step_size;
             }
 
             // step forward
             step_size =
-                ubo.raymarch_step
-                + ubo.raymarch_step_jitter
+                RAYMARCH_STEP
+                + RAYMARCH_STEP_JITTER
                 * (hash_3ff(vec3f(frag_coord, -777. + t)) - .5);
             t += step_size;
         }
     }
 
-    return ubo.bg_col + (col * ubo.brightness);
+    return BG_COL + (col * BRIGHTNESS);
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
     extract_uniforms();
 
-    let frag_coord = in.uv * vec2f(ubo.res);
+    let frag_coord = in.uv * vec2f(RES);
 
     // multisampling
     var col = vec3f(0);
-    for (var i: i32 = 0; i < ubo.n_samples_per_pixel; i++) {
+    for (var i: i32 = 0; i < N_SAMPLES_PER_PIXEL; i++) {
         let rand = hash_3ff(vec3f(frag_coord, f32(i + 800)));
         let jitter = vec2f(rand, hash_1ff(rand)) - .5;
 
         col += render(frag_coord.xy + jitter);
     }
-    col /= f32(ubo.n_samples_per_pixel);
+    col /= f32(N_SAMPLES_PER_PIXEL);
     
     // flim
-    if (ubo.apply_flim) {
+    if (APPLY_FLIM) {
         col = flim(col, false);
     }
 

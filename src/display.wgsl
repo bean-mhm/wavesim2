@@ -1,14 +1,10 @@
-struct UniformBuf {
-    srgb_surface: vec4i, // if surface format applies sRGB OETF internally
-};
+// the following will be replaced with constants
+// [constants]
 
 @group(0) @binding(0)
-var<uniform> ubo: UniformBuf;
-
-@group(0) @binding(1)
 var render_target: texture_2d<f32>;
 
-@group(0) @binding(2)
+@group(0) @binding(1)
 var linear_sampler: sampler;
 
 struct VsOut {
@@ -61,7 +57,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
         linear_sampler,
         in.uv
     ).rgb;
-    if (ubo.srgb_surface[0] != 0)
+    if (SRGB_SURFACE)
     {
         col = srgb_to_linear_bt709_id65(col);
     }
