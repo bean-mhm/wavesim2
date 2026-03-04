@@ -8,7 +8,7 @@ WINDOW_TITLE = "wavesim2 (time: {:.3f}, iter: {})"
 
 # store source code for shaders with replacements applied. useful for debugging,
 # especially when we need to go to a certain line number.
-STORE_RESOLVED_SHADER_CODE = True
+STORE_RESOLVED_SHADER_CODE = False
 
 
 class WaveSimState:
