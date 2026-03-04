@@ -987,24 +987,75 @@ fn screen_to_uv(frag_coord: vec2f) -> vec2f {
            f32(min(RES.x, RES.y));
 }
 
-fn sample_grid(p: vec3f) -> f32 {
+fn grid_fetch(icoord: vec3i) -> f32 {
+    return textureLoad(render_grid, icoord).x;
+}
+
+fn grid_sample(p: vec3f) -> f32 {
     // de-center and normalize to [0, 1]
     let p_norm = p / SIM_GRID_DIMS + .5;
 
-    // get 3D integer coordinates in the grid
-    let icoord = vec3i(floor(
-        p_norm * vec3f(SIM_GRID_RES)
-    ));
-
-    // handle out-of-bounds
-    if (any(icoord < vec3i(0)) || any(icoord >= SIM_GRID_RES)) {
-        return 0.;
-    }
-
     if (USE_TRILINEAR) {
-        // TODO
-        return textureLoad(render_grid, icoord).x;
+        // bottom back left cell index (float)
+        let fcoord = p_norm * vec3f(SIM_GRID_RES) - .5;
+
+        // bottom back left cell index (integer)
+        let icoord_bbl = vec3i(floor(fcoord));
+
+        // blending weights
+        let weights = fract(fcoord);
+
+        // handle out-of-bounds
+        if (any(icoord_bbl >= SIM_GRID_RES)
+            || any((icoord_bbl + 1) < vec3i(0))) {
+            return 0.;
+        }
+        
+        // fetch all 8 corners
+        let v000 = grid_fetch(icoord_bbl);
+        let v001 = grid_fetch(icoord_bbl + vec3i(0, 0, 1));
+        let v010 = grid_fetch(icoord_bbl + vec3i(0, 1, 0));
+        let v011 = grid_fetch(icoord_bbl + vec3i(0, 1, 1));
+        let v100 = grid_fetch(icoord_bbl + vec3i(1, 0, 0));
+        let v101 = grid_fetch(icoord_bbl + vec3i(1, 0, 1));
+        let v110 = grid_fetch(icoord_bbl + vec3i(1, 1, 0));
+        let v111 = grid_fetch(icoord_bbl + vec3i(1, 1, 1));
+
+        // interpolate
+        return mix(
+            mix(
+                mix(
+                    v000,
+                    v100,
+                    weights.x
+                ),
+                mix(
+                    v010,
+                    v110,
+                    weights.x
+                ),
+                weights.y
+            ),
+            mix(
+                mix(
+                    v001,
+                    v101,
+                    weights.x
+                ),
+                mix(
+                    v011,
+                    v111,
+                    weights.x
+                ),
+                weights.y
+            ),
+            weights.z
+        );
     } else {
+        // get 3D indices in the grid
+        let icoord = vec3i(floor(
+            p_norm * vec3f(SIM_GRID_RES)
+        ));
         return textureLoad(render_grid, icoord).x;
     }
 }
@@ -1056,7 +1107,7 @@ fn render(frag_coord: vec2f) -> vec3f {
             let p = ray.orig + t * ray.dir;
 
             // sample the 3D volume
-            var v = sample_grid(p);
+            var v = grid_sample(p);
 
             // collect sample
             if (false) {
