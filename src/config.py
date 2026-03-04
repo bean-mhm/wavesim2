@@ -46,6 +46,10 @@ class CameraState(NamedTuple):
 
 class WaveSimParams(NamedTuple):
     # simulation grid resolution
+    # NOTE: if (and only if) the third axis (z) equals 1, 2D simulation logic
+    # will be used instead of 3D, and the computed limits (e.g. max stable
+    # timestep) will also assume a 2D simulation. this only applies if the third
+    # axis is 1, not the other two.
     grid_res: tuple[int, int, int]
 
     # simulation grid cell (voxel) size
@@ -95,6 +99,9 @@ class WaveSimParams(NamedTuple):
     # simulation grid resolution
     #   GRID_RES: vec3i
     #
+    # same as (GRID_RES.z == 1)
+    #   IS_2D: bool
+    #
     # simulation grid cell (voxel) size
     #   CELL_SIZE: f32
     #
@@ -139,6 +146,9 @@ class WaveSimParams(NamedTuple):
     #       curr: f32, // value in the current iteration
     #       prev: f32, // value in the previous iteration
     #   };
+    #
+    # for more advanced use cases, you've also got this function:
+    #   fn grid_fetch(icoord: vec3i) -> WaveValue {...}
 
     # rendering: background color
     render_bg_col: tuple[float, float, float]
@@ -196,6 +206,9 @@ class WaveSimLimits:
     impedance_matching_coefficient: float
 
     def __init__(self, params: WaveSimParams):
+        dimensionality = 2 if params.grid_res[2] == 1 else 3
+        sqrt_dimensionality = np.sqrt(float(dimensionality))
+
         self.grid_dims = (
             params.cell_size * params.grid_res[0],
             params.cell_size * params.grid_res[1],
@@ -203,14 +216,14 @@ class WaveSimLimits:
         )
 
         self.max_timestep = \
-            params.cell_size / (params.wave_speed * np.sqrt(3.))
+            params.cell_size / (params.wave_speed * sqrt_dimensionality)
 
         self.resolved_timestep = params.timestep
         if self.resolved_timestep < 0:
             self.resolved_timestep = \
                 -self.resolved_timestep * self.max_timestep
 
-        self.min_wavelength = params.cell_size * np.sqrt(3.) * 8.
+        self.min_wavelength = params.cell_size * sqrt_dimensionality * 8.
         self.max_freq = params.wave_speed / self.min_wavelength
 
         self.impedance_matching_coefficient = \
@@ -233,7 +246,6 @@ fn initial_value(icoord: vec3i) -> WaveValue {
     """,
     update_value_function="""
 fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
-    // initial pulse at the center
     if (all(icoord == GRID_RES / 2)) {
         let freq = .9 * MAX_FREQ;
         return 10. * sin(TAU * ubo.time * freq);
@@ -243,7 +255,7 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     """,
     speed_fac_function="""
 fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
-    if (all(abs(icoord - vec3i(85, 50, 50)) <= vec3i(5))) {
+    if (all(abs(icoord - vec3i(85, 50, 50)) <= vec3i(6))) {
         return 0.;
     }
     return 1.;
@@ -267,7 +279,61 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     render_apply_flim=True
 )
 
+sim_2d_planar_wave = WaveSimParams(
+    grid_res=(500, 500, 1),
+    cell_size=.001,
+    wave_speed=.1,
+    remove_reflections=True,
+    damp_fac=.95,
+    timestep=-.5,
+    n_sim_steps_per_frame=2,
+    initial_value_function="""
+fn initial_value(icoord: vec3i) -> WaveValue {
+    return WaveValue(0, 0);
+}
+    """,
+    update_value_function="""
+fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
+    if (icoord.x == GRID_RES.x / 5
+        && abs(f32(icoord.y) / f32(GRID_RES.y) - .5) < .2) {
+        let freq = .9 * MAX_FREQ;
+        let v_new = 3. * sin(TAU * ubo.time * freq);
+        return mix(
+            v.curr,
+            v_new,
+            remap_clamp(ubo.time, 2., 2.5, 1., 0.)
+        );
+    }
+    return v.curr;
+}
+    """,
+    speed_fac_function="""
+fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
+    if (all(abs(icoord - vec3i(400, 250, 0)) <= vec3i(6))) {
+        return 0.;
+    }
+    return 1.;
+}
+    """,
+    render_bg_col=(.02, .005, .02),
+    render_tint_positive=(1., .4, 0.),
+    render_tint_negative=(0., .3, 1.),
+    render_brightness=500.,
+    render_n_samples_per_pixel=4,
+    render_raymarch_step=.0003,
+    render_raymarch_step_jitter=.0002,
+    render_use_trilinear=True,
+    render_camera_function=lambda params, limits, state:
+    CameraState(
+        pos=(0., 0., 2.),
+        lookat=(0., 0., 0.),
+        world_up=(0., 1., 0.),
+        fov_degrees=12.
+    ),
+    render_apply_flim=True
+)
+
 
 # choose which simulation to run from above
-selected_sim_params = sim_test
+selected_sim_params = sim_2d_planar_wave
 selected_sim_limits = WaveSimLimits(selected_sim_params)

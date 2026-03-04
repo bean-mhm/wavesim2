@@ -151,6 +151,7 @@ def main():
                 "// [constants]",
                 f"""
 const GRID_RES = vec3i{str(selected_sim_params.grid_res)};
+const IS_2D = {str(selected_sim_params.grid_res[2] == 1).lower()};
 const CELL_SIZE = {selected_sim_params.cell_size};
 const GRID_DIMS = vec3f{str(selected_sim_limits.grid_dims)};
 const WAVE_SPEED = {selected_sim_params.wave_speed};

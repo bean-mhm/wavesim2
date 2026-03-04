@@ -215,7 +215,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
                 + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
-        if (icoord.z == 0) {
+        if (icoord.z == 0 && !IS_2D) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(0, 0, 1));
             v.curr =
@@ -223,7 +223,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
                 + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
-        if (icoord.z == GRID_RES.z - 1) {
+        if (icoord.z == GRID_RES.z - 1 && !IS_2D) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(0, 0, 1));
             v.curr =
@@ -269,7 +269,10 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
     // d2u/dx2 (but without the dx2 because it'll be applied below)
     let grad_x = next_in_x - v.curr - v.curr + prev_in_x;
     let grad_y = next_in_y - v.curr - v.curr + prev_in_y;
-    let grad_z = next_in_z - v.curr - v.curr + prev_in_z;
+    var grad_z: f32 = 0.;
+    if (!IS_2D) {
+        grad_z = next_in_z - v.curr - v.curr + prev_in_z;
+    }
 
     // propagation speed
     let c = WAVE_SPEED * speed_fac(icoord, v);
