@@ -166,8 +166,9 @@ const IMPEDANCE_MATCHING_COEFFICIENT = {selected_sim_limits.impedance_matching_c
             ),
             (
                 "// [user-functions]",
-                selected_sim_params.initial_value_function +
-                selected_sim_params.update_value_function
+                selected_sim_params.initial_value_function
+                + selected_sim_params.update_value_function
+                + selected_sim_params.speed_fac_function
             )
         ]
     )

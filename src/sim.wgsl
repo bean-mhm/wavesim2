@@ -157,7 +157,7 @@ fn grid_write(icoord: vec3i, v: WaveValue) {
 }
 
 // the following will be replaced with the definitions for user-provided
-// functions initial_value() and update_value().
+// functions initial_value, update_value, and speed_fac. see "config.py".
 // [user-functions]
 
 @compute @workgroup_size(8, 8, 4)
@@ -271,10 +271,14 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
     let grad_y = next_in_y - v.curr - v.curr + prev_in_y;
     let grad_z = next_in_z - v.curr - v.curr + prev_in_z;
 
+    // propagation speed
+    let c = WAVE_SPEED * speed_fac(icoord, v);
+    let c2 = c * c;
+
     // d2u/dt2
     let acc =
         (grad_x + grad_y + grad_z)  // Laplacian
-        * (WAVE_SPEED * WAVE_SPEED)  // c^2
+        * c2  // c^2
         / (CELL_SIZE * CELL_SIZE);  // dx^2
 
     // du/dt

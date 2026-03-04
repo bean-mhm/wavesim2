@@ -79,6 +79,12 @@ class WaveSimParams(NamedTuple):
     # modified. see "sim.wgsl" and sim_test below for an example.
     update_value_function: str
 
+    # WGSL function used in the compute shader returning the wave propagation
+    # speed factor for every cell, useful for defining obstacles, reflectors, or
+    # lenses (refractors). must return values in the [0, 1] range for a stable
+    # simulation.
+    speed_fac_function: str
+
     # NOTE:
     # the following constants and uniform values are accessible in the WGSL
     # functions above:
@@ -233,6 +239,14 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
         return 10. * sin(TAU * ubo.time * freq);
     }
     return v.curr;
+}
+    """,
+    speed_fac_function="""
+fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
+    if (all(abs(icoord - vec3i(85, 50, 50)) <= vec3i(5))) {
+        return 0.;
+    }
+    return 1.;
 }
     """,
     render_bg_col=(.02, .005, .02),
