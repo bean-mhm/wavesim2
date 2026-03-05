@@ -1,4 +1,5 @@
 from pathlib import Path
+from copy import deepcopy
 import numpy as np
 import wgpu
 
@@ -128,12 +129,12 @@ def main():
 
     canvas = RenderCanvas(
         size=(
-            int(RENDER_RES[0] * DISPLAY_SCALE),
-            int(RENDER_RES[1] * DISPLAY_SCALE)
+            int(selected_sim_params.render_res[0] * DISPLAY_SCALE),
+            int(selected_sim_params.render_res[1] * DISPLAY_SCALE)
         ),
         title=WINDOW_TITLE,
-        update_mode="continuous",
-        max_fps=60,
+        update_mode="fastest",
+        # max_fps=60,
         vsync=True,
     )
 
@@ -181,19 +182,25 @@ const IMPEDANCE_MATCHING_COEFFICIENT = {selected_sim_limits.impedance_matching_c
             (
                 "// [constants]",
                 f"""
-const RES = vec2i{str(RENDER_RES)};
+const RES = vec2i{str(selected_sim_params.render_res)};
 const BG_COL = vec3f{str(selected_sim_params.render_bg_col)};
-const TINT_POSITIVE = vec3f{str(selected_sim_params.render_tint_positive)};
-const TINT_NEGATIVE = vec3f{str(selected_sim_params.render_tint_negative)};
-const BRIGHTNESS = {selected_sim_params.render_brightness};
 const N_SAMPLES_PER_PIXEL = {selected_sim_params.render_n_samples_per_pixel};
 const RAYMARCH_STEP = {selected_sim_params.render_raymarch_step};
 const RAYMARCH_STEP_JITTER = {selected_sim_params.render_raymarch_step_jitter};
 const USE_TRILINEAR = {str(selected_sim_params.render_use_trilinear).lower()};
 const APPLY_FLIM = {str(selected_sim_params.render_apply_flim).lower()};
 const SIM_GRID_RES = vec3i{str(selected_sim_params.grid_res)};
+const SIM_IS_2D = {str(selected_sim_params.grid_res[2] == 1).lower()};
 const SIM_GRID_DIMS = vec3f{str(selected_sim_limits.grid_dims)};
                 """
+            ),
+            (
+                "// [colormaps]",
+                WGSL_COLORMAPS
+            ),
+            (
+                "// [user-functions]",
+                selected_sim_params.render_shade_cell_function
             )
         ]
     )
@@ -236,7 +243,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
     # render target
     render_target = device.create_texture(
         label="render target",
-        size=RENDER_RES,
+        size=selected_sim_params.render_res,
         format=wgpu.TextureFormat.rgba8unorm,
         usage=(
             wgpu.TextureUsage.RENDER_ATTACHMENT |
@@ -279,7 +286,8 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         ("cam_lookat", np.float32, (3,)),
         ("cam_world_up", np.float32, (3,)),
         ("cam_fov_degrees", np.float32),
-        ("_pad", np.int32, (2,)),
+        ("sim_iter", np.int32),
+        ("sim_time", np.float32),
     ])
 
     render_uniform = np.zeros((), dtype=render_uniform_dtype)
@@ -404,6 +412,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
 
     # simulation state
     sim_state = WaveSimState(selected_sim_limits.resolved_timestep)
+    prev_sim_state = deepcopy(sim_state)
 
     # per-frame logic
     def draw():
@@ -458,9 +467,10 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
             device.queue.submit([cmd_encoder.finish()])
 
             # update simulation state
+            prev_sim_state = deepcopy(sim_state)
             sim_state.advance()
 
-        # update camera state in the render uniform buffer
+        # update render uniform buffer
 
         cam_state = selected_sim_params.render_camera_function(
             selected_sim_params,
@@ -472,6 +482,8 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         render_uniform["cam_lookat"] = cam_state.lookat
         render_uniform["cam_world_up"] = cam_state.world_up
         render_uniform["cam_fov_degrees"] = cam_state.fov_degrees
+        render_uniform["sim_iter"] = prev_sim_state.iter
+        render_uniform["sim_time"] = prev_sim_state.time
 
         render_uniform_buffer.upload()
 

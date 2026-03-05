@@ -2,13 +2,40 @@ from typing import NamedTuple
 from collections.abc import Callable
 import numpy as np
 
-RENDER_RES = (2160, 1080)
-DISPLAY_SCALE = .6
+DISPLAY_SCALE = 1.5
 WINDOW_TITLE = "wavesim2 (time: {:.3f}, iter: {})"
 
 # store source code for shaders with replacements applied. useful for debugging,
 # especially when we need to go to a certain line number.
 STORE_RESOLVED_SHADER_CODE = False
+
+# WGSL colormap functions used in the fragment shader, accessible from
+# WaveSimParams.render_shade_cell_function.
+WGSL_COLORMAPS = """
+    fn colormap_simple(v: f32) -> vec3f {
+        return mix(
+            vec3f(0, .3, 1) * -v,
+            vec3f(1, .4, 0) * v,
+            saturate(sign(v))
+        );
+    }
+
+    fn colormap_grayscale_positive_only(v: f32) -> vec3f {
+        return vec3f(max(v, 0.));
+    }
+
+    fn colormap_grayscale_abs(v: f32) -> vec3f {
+        return vec3f(abs(v));
+    }
+
+    fn colormap_squared_jet(v: f32) -> vec3f {
+        return vec3f(1, 0, .5) * v * v;
+    }
+
+    fn colormap_squared_grayscale(v: f32) -> vec3f {
+        return vec3f(v * v);
+    }
+"""
 
 
 class WaveSimState:
@@ -38,18 +65,21 @@ class WaveSimState:
 
 
 class CameraState(NamedTuple):
-    pos: tuple[float, float, float]
-    lookat: tuple[float, float, float]
-    world_up: tuple[float, float, float]
-    fov_degrees: float
+    pos: tuple[float, float, float] = (0., -1., 0.)
+    lookat: tuple[float, float, float] = (0., 0., 0.)
+    world_up: tuple[float, float, float] = (0., 0., 1.)
+    fov_degrees: float = 90.
 
 
 class WaveSimParams(NamedTuple):
+    # render resolution
+    render_res: tuple[int, int]
+
     # simulation grid resolution
-    # NOTE: if (and only if) the third axis (z) equals 1, 2D simulation logic
-    # will be used instead of 3D, and the computed limits (e.g. max stable
-    # timestep) will also assume a 2D simulation. this only applies if the third
-    # axis is 1, not the other two.
+    # NOTE: if (and only if) the third axis (z) equals 1, 2D simulation and
+    # rendering logic will be used instead of 3D, and the computed limits (e.g.
+    # max stable timestep) will also assume a 2D simulation. this only applies
+    # if the third axis (z) is 1, not the other two.
     grid_res: tuple[int, int, int]
 
     # simulation grid cell (voxel) size
@@ -153,29 +183,51 @@ class WaveSimParams(NamedTuple):
     # rendering: background color
     render_bg_col: tuple[float, float, float]
 
-    # rendering: volume color in positive areas
-    render_tint_positive: tuple[float, float, float]
-
-    # rendering: volume color in negative areas
-    render_tint_negative: tuple[float, float, float]
-
-    # rendering: volume brightness multiplier
-    render_brightness: float
+    # WGSL function used in the fragment shader returning a color for every grid
+    # cell based on its stored value (v) and coordinates (icoord) as well as the
+    # constants and uniform values mentioned below. this function is useful for
+    # colorizing the grid values with colormaps and adding visual indicators for
+    # obstacles, lenses, etc.
+    #
+    # NOTE:
+    # the following WGSL constants and uniform values are accessible in the
+    # fragment shader and therefore this function:
+    #
+    # math constants
+    #   PI, TAU, HALF_PI: f32
+    #
+    # simulation grid resolution
+    #   SIM_GRID_RES: vec3i
+    #
+    # same as (GRID_RES.z == 1)
+    #   SIM_IS_2D: bool
+    #
+    # dimensions of the simulation grid (cell_size * grid_res)
+    #   SIM_GRID_DIMS: vec3f
+    #
+    # simulation iteration
+    #   ubo.sim_iter: i32
+    #
+    # simulation time
+    #   ubo.sim_time: f32
+    render_shade_cell_function: str
 
     # rendering: number of jittered samples per pixel for anti-aliasing
     render_n_samples_per_pixel: int
 
-    # rendering: step size for ray marching
+    # rendering: step size for ray marching. not used in 2D simulations.
     render_raymarch_step: float
 
-    # rendering: step size jitter for ray marching
+    # rendering: step size jitter for ray marching. not used in 2D simulations.
     render_raymarch_step_jitter: float
 
     # rendering: use trilinear interpolation/filtering for sampling the
-    # simulation grid instead of nearest-neighbor.
+    # simulation grid instead of nearest-neighbor. for 2D simulations, this
+    # enables bilinear filtering.
     render_use_trilinear: bool
 
-    # rendering: Python function returning the camera state per frame
+    # rendering: Python function returning the camera state per frame. not used
+    # in 2D simulations.
     render_camera_function: Callable[
         [WaveSimParams, WaveSimLimits, WaveSimState],
         CameraState
@@ -232,6 +284,7 @@ class WaveSimLimits:
 
 
 sim_test = WaveSimParams(
+    render_res=(1280, 720),
     grid_res=(100, 100, 100),
     cell_size=.01,
     wave_speed=.05,
@@ -262,9 +315,11 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
 }
     """,
     render_bg_col=(.02, .005, .02),
-    render_tint_positive=(1., .4, 0.),
-    render_tint_negative=(0., .3, 1.),
-    render_brightness=5.,
+    render_shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
+    return colormap_simple(v);
+}
+    """,
     render_n_samples_per_pixel=4,
     render_raymarch_step=.018,
     render_raymarch_step_jitter=.015,
@@ -280,6 +335,7 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
 )
 
 sim_2d_planar_wave = WaveSimParams(
+    render_res=(500, 500),
     grid_res=(500, 500, 1),
     cell_size=.001,
     wave_speed=.1,
@@ -315,21 +371,17 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     return 1.;
 }
     """,
-    render_bg_col=(.02, .005, .02),
-    render_tint_positive=(1., .4, 0.),
-    render_tint_negative=(0., .3, 1.),
-    render_brightness=500.,
-    render_n_samples_per_pixel=4,
-    render_raymarch_step=.0003,
-    render_raymarch_step_jitter=.0002,
+    render_bg_col=(.01, 0., .02),
+    render_shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
+    return colormap_squared_grayscale(v * .5);
+}
+    """,
+    render_n_samples_per_pixel=16,
+    render_raymarch_step=0,
+    render_raymarch_step_jitter=0,
     render_use_trilinear=True,
-    render_camera_function=lambda params, limits, state:
-    CameraState(
-        pos=(0., 0., 2.),
-        lookat=(0., 0., 0.),
-        world_up=(0., 1., 0.),
-        fov_degrees=12.
-    ),
+    render_camera_function=lambda params, limits, state: CameraState(),
     render_apply_flim=True
 )
 

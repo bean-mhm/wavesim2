@@ -12,6 +12,8 @@ struct UniformBuf {
     cam_lookat: vec3f,
     cam_world_up: vec3f,
     cam_fov_degrees: f32,
+    sim_iter: i32,
+    sim_time: f32,
 };
 
 @group(0) @binding(0)
@@ -24,6 +26,8 @@ fn extract_uniforms() {
     ubo.cam_lookat = vec3f(ubo_raw.d0.w, ubo_raw.d1.xy);
     ubo.cam_world_up = vec3f(ubo_raw.d1.zw, ubo_raw.d2.x);
     ubo.cam_fov_degrees = ubo_raw.d2.y;
+    ubo.sim_iter = bitcast<i32>(ubo_raw.d2.z);
+    ubo.sim_time = ubo_raw.d2.w;
 }
 
 @group(0) @binding(1)
@@ -182,36 +186,6 @@ fn spherical_to_cartesian(s: vec3f) -> vec3f {
         sin_theta * sin(s.z),
         cos(s.y)
     );
-}
-
-// https://www.desmos.com/calculator/n4mfhffj1n
-fn f_cmap(x: f32, v: f32) -> f32 {
-    var vv = v;
-    if (abs(vv) < .0001) { vv = .0001; }
-    let p = pow(2., vv);
-    return (1. - pow(p, -x)) / (1. - 1. / p);
-}
-
-// https://www.shadertoy.com/view/DdcyRf
-fn colormap(x_in: f32) -> vec3f {
-    var x = x_in;
-    let t = .6 + .8 * x;
-    
-    // https://www.desmos.com/calculator/sdqk904uu9
-    let tone = 10. * vec3f(
-        cos(6.283 * t),
-        cos(6.283 * (t - .333)),
-        cos(6.283 * (t - .667))
-    );
-    
-    x = smoothstep(-.04, 1., x);
-    let c = vec3f(
-        f_cmap(x, tone.r),
-        f_cmap(x, tone.g),
-        f_cmap(x, tone.b)
-    );
-    
-    return c;
 }
 
 struct Ray {
@@ -987,15 +961,62 @@ fn screen_to_uv(frag_coord: vec2f) -> vec2f {
            f32(min(RES.x, RES.y));
 }
 
-fn grid_fetch(icoord: vec3i) -> f32 {
-    return textureLoad(render_grid, icoord).x;
+// the following will be replaced with colormap functions. see "config.py".
+// [colormaps]
+
+// the following will be replaced with a user-provided definition for the
+// function shade_cell. see "config.py".
+// [user-functions]
+
+fn grid_fetch(icoord: vec3i) -> vec3f {
+    return shade_cell(
+        icoord,
+        textureLoad(render_grid, icoord).x
+    );
 }
 
-fn grid_sample(p: vec3f) -> f32 {
+fn grid_sample(p: vec3f) -> vec3f {
     // de-center and normalize to [0, 1]
     let p_norm = p / SIM_GRID_DIMS + .5;
 
-    if (USE_TRILINEAR) {
+    if (USE_TRILINEAR && SIM_IS_2D) {
+        // bottom left cell index (float)
+        let fcoord = p_norm.xy * vec2f(SIM_GRID_RES.xy) - .5;
+
+        // bottom left cell index (integer)
+        let icoord_bl = vec2i(floor(fcoord));
+
+        // blending weights
+        let weights = fract(fcoord);
+
+        // handle out-of-bounds
+        if (any(icoord_bl >= SIM_GRID_RES.xy)
+            || any((icoord_bl + 1) < vec2i(0))) {
+            return grid_fetch(vec3i(icoord_bl, 0));
+        }
+        
+        // fetch all 4 corners
+        let v00 = grid_fetch(vec3i(icoord_bl, 0));
+        let v01 = grid_fetch(vec3i(icoord_bl + vec2i(0, 1), 0));
+        let v10 = grid_fetch(vec3i(icoord_bl + vec2i(1, 0), 0));
+        let v11 = grid_fetch(vec3i(icoord_bl + vec2i(1, 1), 0));
+
+        // interpolate
+        return mix(
+            mix(
+                v00,
+                v10,
+                weights.x
+            ),
+            mix(
+                v01,
+                v11,
+                weights.x
+            ),
+            weights.y
+        );
+    }
+    else if (USE_TRILINEAR && !SIM_IS_2D) {
         // bottom back left cell index (float)
         let fcoord = p_norm * vec3f(SIM_GRID_RES) - .5;
 
@@ -1008,7 +1029,7 @@ fn grid_sample(p: vec3f) -> f32 {
         // handle out-of-bounds
         if (any(icoord_bbl >= SIM_GRID_RES)
             || any((icoord_bbl + 1) < vec3i(0))) {
-            return 0.;
+            return grid_fetch(icoord_bbl);
         }
         
         // fetch all 8 corners
@@ -1056,11 +1077,22 @@ fn grid_sample(p: vec3f) -> f32 {
         let icoord = vec3i(floor(
             p_norm * vec3f(SIM_GRID_RES)
         ));
-        return textureLoad(render_grid, icoord).x;
+        return grid_fetch(icoord);
     }
 }
 
 fn render(frag_coord: vec2f) -> vec3f {
+    if (SIM_IS_2D) {
+        let scale = min(
+            f32(RES.x) / SIM_GRID_DIMS.x,
+            f32(RES.y) / SIM_GRID_DIMS.y
+        );
+        let frag_coord_centered = frag_coord - .5 * vec2f(RES);
+        let p = frag_coord_centered / scale;
+        let col = grid_sample(vec3f(p, 0));
+        return BG_COL + col;
+    }
+
     let uv = screen_to_uv(frag_coord);
 
     // setup camera
@@ -1107,19 +1139,10 @@ fn render(frag_coord: vec2f) -> vec3f {
             let p = ray.orig + t * ray.dir;
 
             // sample the 3D volume
-            var v = grid_sample(p);
+            var sample = grid_sample(p);
 
-            // collect sample
-            if (false) {
-                col += colormap(10. * v * v) * step_size;
-            } else {
-                var final_tint = TINT_POSITIVE;
-                if (v < 0.) {
-                    v = -v;
-                    final_tint = TINT_NEGATIVE;
-                }
-                col += v * final_tint * step_size;
-            }
+            // collect the sample
+            col += sample * step_size;
 
             // step forward
             step_size =
@@ -1130,7 +1153,7 @@ fn render(frag_coord: vec2f) -> vec3f {
         }
     }
 
-    return BG_COL + (col * BRIGHTNESS);
+    return BG_COL + col;
 }
 
 @fragment
@@ -1158,7 +1181,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     col = linear_bt709_id65_to_srgb(col);
 
     // dithering
-    col += (hash_3ff(vec3f(frag_coord, 92.147)) - .5) / 255.;
+    col += (hash_3ff(vec3f(frag_coord, 92.147)) - .5) / 256.;
     col = saturate(col);
     
     // output
