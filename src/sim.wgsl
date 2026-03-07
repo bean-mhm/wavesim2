@@ -142,6 +142,11 @@ fn remap4_01(
     return saturate((x - inp_start) / (inp_end - inp_start));
 }
 
+fn icoord_to_world(icoord: vec3i) -> vec3f {
+    let p_norm = (vec3f(icoord) + .5) / vec3f(GRID_RES);
+    return (p_norm - .5) * GRID_DIMS;
+}
+
 struct WaveValue {
     curr: f32, // value in the current iteration
     prev: f32, // value in the previous iteration
@@ -193,7 +198,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
         }
         if (icoord.x == GRID_RES.x - 1) {
             boundary = true;
-            let neighbor = grid_fetch(icoord + vec3i(1, 0, 0));
+            let neighbor = grid_fetch(icoord + vec3i(-1, 0, 0));
             v.curr =
                 neighbor.prev
                 + IMPEDANCE_MATCHING_COEFFICIENT
@@ -209,7 +214,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
         }
         if (icoord.y == GRID_RES.y - 1) {
             boundary = true;
-            let neighbor = grid_fetch(icoord + vec3i(0, 1, 0));
+            let neighbor = grid_fetch(icoord + vec3i(0, -1, 0));
             v.curr =
                 neighbor.prev
                 + IMPEDANCE_MATCHING_COEFFICIENT
@@ -225,7 +230,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
         }
         if (icoord.z == GRID_RES.z - 1 && !IS_2D) {
             boundary = true;
-            let neighbor = grid_fetch(icoord + vec3i(0, 0, 1));
+            let neighbor = grid_fetch(icoord + vec3i(0, 0, -1));
             v.curr =
                 neighbor.prev
                 + IMPEDANCE_MATCHING_COEFFICIENT

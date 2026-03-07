@@ -12,8 +12,8 @@ struct UniformBuf {
     cam_lookat: vec3f,
     cam_world_up: vec3f,
     cam_fov_degrees: f32,
-    sim_iter: i32,
-    sim_time: f32,
+    iter: i32,
+    time: f32,
 };
 
 @group(0) @binding(0)
@@ -26,8 +26,8 @@ fn extract_uniforms() {
     ubo.cam_lookat = vec3f(ubo_raw.d0.w, ubo_raw.d1.xy);
     ubo.cam_world_up = vec3f(ubo_raw.d1.zw, ubo_raw.d2.x);
     ubo.cam_fov_degrees = ubo_raw.d2.y;
-    ubo.sim_iter = bitcast<i32>(ubo_raw.d2.z);
-    ubo.sim_time = ubo_raw.d2.w;
+    ubo.iter = bitcast<i32>(ubo_raw.d2.z);
+    ubo.time = ubo_raw.d2.w;
 }
 
 @group(0) @binding(1)
@@ -961,6 +961,11 @@ fn screen_to_uv(frag_coord: vec2f) -> vec2f {
            f32(min(RES.x, RES.y));
 }
 
+fn icoord_to_world(icoord: vec3i) -> vec3f {
+    let p_norm = (vec3f(icoord) + .5) / vec3f(GRID_RES);
+    return (p_norm - .5) * GRID_DIMS;
+}
+
 // the following will be replaced with colormap functions. see "config.py".
 // [colormaps]
 
@@ -977,11 +982,11 @@ fn grid_fetch(icoord: vec3i) -> vec3f {
 
 fn grid_sample(p: vec3f) -> vec3f {
     // de-center and normalize to [0, 1]
-    let p_norm = p / SIM_GRID_DIMS + .5;
+    let p_norm = p / GRID_DIMS + .5;
 
-    if (USE_TRILINEAR && SIM_IS_2D) {
+    if (USE_TRILINEAR && IS_2D) {
         // bottom left cell index (float)
-        let fcoord = p_norm.xy * vec2f(SIM_GRID_RES.xy) - .5;
+        let fcoord = p_norm.xy * vec2f(GRID_RES.xy) - .5;
 
         // bottom left cell index (integer)
         let icoord_bl = vec2i(floor(fcoord));
@@ -990,7 +995,7 @@ fn grid_sample(p: vec3f) -> vec3f {
         let weights = fract(fcoord);
 
         // handle out-of-bounds
-        if (any(icoord_bl >= SIM_GRID_RES.xy)
+        if (any(icoord_bl >= GRID_RES.xy)
             || any((icoord_bl + 1) < vec2i(0))) {
             return grid_fetch(vec3i(icoord_bl, 0));
         }
@@ -1016,9 +1021,9 @@ fn grid_sample(p: vec3f) -> vec3f {
             weights.y
         );
     }
-    else if (USE_TRILINEAR && !SIM_IS_2D) {
+    else if (USE_TRILINEAR && !IS_2D) {
         // bottom back left cell index (float)
-        let fcoord = p_norm * vec3f(SIM_GRID_RES) - .5;
+        let fcoord = p_norm * vec3f(GRID_RES) - .5;
 
         // bottom back left cell index (integer)
         let icoord_bbl = vec3i(floor(fcoord));
@@ -1027,7 +1032,7 @@ fn grid_sample(p: vec3f) -> vec3f {
         let weights = fract(fcoord);
 
         // handle out-of-bounds
-        if (any(icoord_bbl >= SIM_GRID_RES)
+        if (any(icoord_bbl >= GRID_RES)
             || any((icoord_bbl + 1) < vec3i(0))) {
             return grid_fetch(icoord_bbl);
         }
@@ -1075,17 +1080,17 @@ fn grid_sample(p: vec3f) -> vec3f {
     } else {
         // get 3D indices in the grid
         let icoord = vec3i(floor(
-            p_norm * vec3f(SIM_GRID_RES)
+            p_norm * vec3f(GRID_RES)
         ));
         return grid_fetch(icoord);
     }
 }
 
 fn render(frag_coord: vec2f) -> vec3f {
-    if (SIM_IS_2D) {
+    if (IS_2D) {
         let scale = min(
-            f32(RES.x) / SIM_GRID_DIMS.x,
-            f32(RES.y) / SIM_GRID_DIMS.y
+            f32(RES.x) / GRID_DIMS.x,
+            f32(RES.y) / GRID_DIMS.y
         );
         let frag_coord_centered = frag_coord - .5 * vec2f(RES);
         let p = frag_coord_centered / scale;
@@ -1114,8 +1119,8 @@ fn render(frag_coord: vec2f) -> vec3f {
 
     // intersect container box
     var hit = ray_aabb(
-        -.5 * SIM_GRID_DIMS,
-        .5 * SIM_GRID_DIMS,
+        -.5 * GRID_DIMS,
+        .5 * GRID_DIMS,
         ray
     );
 

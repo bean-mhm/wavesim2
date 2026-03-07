@@ -189,9 +189,20 @@ const RAYMARCH_STEP = {selected_sim_params.render_raymarch_step};
 const RAYMARCH_STEP_JITTER = {selected_sim_params.render_raymarch_step_jitter};
 const USE_TRILINEAR = {str(selected_sim_params.render_use_trilinear).lower()};
 const APPLY_FLIM = {str(selected_sim_params.render_apply_flim).lower()};
-const SIM_GRID_RES = vec3i{str(selected_sim_params.grid_res)};
-const SIM_IS_2D = {str(selected_sim_params.grid_res[2] == 1).lower()};
-const SIM_GRID_DIMS = vec3f{str(selected_sim_limits.grid_dims)};
+
+const GRID_RES = vec3i{str(selected_sim_params.grid_res)};
+const IS_2D = {str(selected_sim_params.grid_res[2] == 1).lower()};
+const CELL_SIZE = {selected_sim_params.cell_size};
+const GRID_DIMS = vec3f{str(selected_sim_limits.grid_dims)};
+const WAVE_SPEED = {selected_sim_params.wave_speed};
+const REMOVE_REFLECTIONS = {str(selected_sim_params.remove_reflections).lower()};
+const DAMP_FAC = {selected_sim_params.damp_fac};
+const DAMP_FAC_PER_DT = {selected_sim_params.damp_fac ** selected_sim_limits.resolved_timestep};
+const TIMESTEP = {selected_sim_limits.resolved_timestep};
+const MAX_TIMESTEP = {selected_sim_limits.max_timestep};
+const MIN_WAVELENGTH = {selected_sim_limits.min_wavelength};
+const MAX_FREQ = {selected_sim_limits.max_freq};
+const IMPEDANCE_MATCHING_COEFFICIENT = {selected_sim_limits.impedance_matching_coefficient};
                 """
             ),
             (
@@ -286,8 +297,8 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         ("cam_lookat", np.float32, (3,)),
         ("cam_world_up", np.float32, (3,)),
         ("cam_fov_degrees", np.float32),
-        ("sim_iter", np.int32),
-        ("sim_time", np.float32),
+        ("iter", np.int32),
+        ("time", np.float32),
     ])
 
     render_uniform = np.zeros((), dtype=render_uniform_dtype)
@@ -482,8 +493,8 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         render_uniform["cam_lookat"] = cam_state.lookat
         render_uniform["cam_world_up"] = cam_state.world_up
         render_uniform["cam_fov_degrees"] = cam_state.fov_degrees
-        render_uniform["sim_iter"] = prev_sim_state.iter
-        render_uniform["sim_time"] = prev_sim_state.time
+        render_uniform["iter"] = prev_sim_state.iter
+        render_uniform["time"] = prev_sim_state.time
 
         render_uniform_buffer.upload()
 
