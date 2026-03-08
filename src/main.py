@@ -2,9 +2,7 @@ from pathlib import Path
 from copy import deepcopy
 import numpy as np
 import wgpu
-
-import PySide6
-from rendercanvas.qt import RenderCanvas, loop
+from rendercanvas.pyside6 import RenderCanvas, loop
 
 from config import *
 
@@ -142,6 +140,10 @@ def main():
     surface_format = context.get_preferred_format(adapter)
     context.configure(device=device, format=surface_format)
 
+    render_grid_format = wgpu.TextureFormat.rg32float
+    if selected_sim_params.averaging:
+        render_grid_format = wgpu.TextureFormat.r32float
+
     # shaders
 
     sim_shader = load_shader(
@@ -175,6 +177,19 @@ const IMPEDANCE_MATCHING_COEFFICIENT = {selected_sim_limits.impedance_matching_c
         ]
     )
 
+    averaging_shader = load_shader(
+        device,
+        "averaging.wgsl",
+        [
+            (
+                "// [constants]",
+                f"""
+const AVERAGING_MIX_FAC_PER_DT = {selected_sim_limits.averaging_mix_fac_per_dt};
+                """
+            )
+        ]
+    )
+
     render_shader = load_shader(
         device,
         "render.wgsl",
@@ -182,6 +197,9 @@ const IMPEDANCE_MATCHING_COEFFICIENT = {selected_sim_limits.impedance_matching_c
             (
                 "// [constants]",
                 f"""
+const AVERAGING = {str(selected_sim_params.averaging).lower()};
+const AVERAGING_TIME_CONSTANT = {selected_sim_params.averaging_time_constant};
+
 const RES = vec2i{str(selected_sim_params.render_res)};
 const BG_COL = vec3f{str(selected_sim_params.render_bg_col)};
 const N_SAMPLES_PER_PIXEL = {selected_sim_params.render_n_samples_per_pixel};
@@ -204,6 +222,10 @@ const MIN_WAVELENGTH = {selected_sim_limits.min_wavelength};
 const MAX_FREQ = {selected_sim_limits.max_freq};
 const IMPEDANCE_MATCHING_COEFFICIENT = {selected_sim_limits.impedance_matching_coefficient};
                 """
+            ),
+            (
+                "[render-grid-format]",
+                render_grid_format
             ),
             (
                 "// [colormaps]",
@@ -232,24 +254,35 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
 
     # create double buffered 3D textures for the simulation
 
-    def create_wave_texture(label):
-        return device.create_texture(
+    def create_wave_texture(
+            label: str,
+            format: wgpu.TextureFormat = wgpu.TextureFormat.rg32float
+    ) -> tuple[wgpu.GPUTexture, wgpu.GPUTextureView]:
+        t = device.create_texture(
             label=label,
             size=selected_sim_params.grid_res,
             dimension=wgpu.TextureDimension.d3,
-            format=wgpu.TextureFormat.rg32float,
+            format=format,
             usage=(
                 wgpu.TextureUsage.TEXTURE_BINDING |
                 wgpu.TextureUsage.STORAGE_BINDING |
                 wgpu.TextureUsage.COPY_DST
             ),
         )
+        v = t.create_view(label=label + " (view)")
+        return t, v
 
-    wave_grid_a = create_wave_texture("wave_grid_a")
-    wave_grid_b = create_wave_texture("wave_grid_b")
+    wave_grid_a, wave_grid_a_view = create_wave_texture("wave_grid_a")
+    wave_grid_b, wave_grid_b_view = create_wave_texture("wave_grid_b")
 
-    wave_grid_a_view = wave_grid_a.create_view(label="wave_grid_a_view")
-    wave_grid_b_view = wave_grid_b.create_view(label="wave_grid_b_view")
+    # create averaging buffer if needed
+    wave_grid_avg = None
+    wave_grid_avg_view = None
+    if selected_sim_params.averaging:
+        wave_grid_avg, wave_grid_avg_view = create_wave_texture(
+            "wave_grid_avg",
+            wgpu.TextureFormat.r32float
+        )
 
     # render target
     render_target = device.create_texture(
@@ -275,7 +308,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         mipmap_filter=wgpu.FilterMode.linear
     )
 
-    # uniform buffer for compute pipeline
+    # uniform buffer for simulation pipeline (also reused for averaging)
 
     sim_uniform_dtype = np.dtype([
         ("iter", np.int32),
@@ -311,7 +344,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
 
     # bind group layouts
 
-    compute_bgl = device.create_bind_group_layout(
+    sim_bgl = device.create_bind_group_layout(
         entries=[
             wgpu.BindGroupLayoutEntry(
                 binding=0,
@@ -339,6 +372,34 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         ]
     )
 
+    averaging_bgl = device.create_bind_group_layout(
+        entries=[
+            wgpu.BindGroupLayoutEntry(
+                binding=0,
+                visibility=wgpu.ShaderStage.COMPUTE,
+                buffer=wgpu.BufferBindingLayout()
+            ),
+            wgpu.BindGroupLayoutEntry(
+                binding=1,
+                visibility=wgpu.ShaderStage.COMPUTE,
+                storage_texture=wgpu.StorageTextureBindingLayout(
+                    access=wgpu.StorageTextureAccess.read_only,
+                    format=wgpu.TextureFormat.rg32float,
+                    view_dimension=wgpu.TextureViewDimension.d3
+                )
+            ),
+            wgpu.BindGroupLayoutEntry(
+                binding=2,
+                visibility=wgpu.ShaderStage.COMPUTE,
+                storage_texture=wgpu.StorageTextureBindingLayout(
+                    access=wgpu.StorageTextureAccess.read_write,
+                    format=wgpu.TextureFormat.r32float,
+                    view_dimension=wgpu.TextureViewDimension.d3
+                )
+            ),
+        ]
+    )
+
     render_bgl = device.create_bind_group_layout(
         entries=[
             wgpu.BindGroupLayoutEntry(
@@ -351,7 +412,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                 visibility=wgpu.ShaderStage.FRAGMENT,
                 storage_texture=wgpu.StorageTextureBindingLayout(
                     access=wgpu.StorageTextureAccess.read_only,
-                    format=wgpu.TextureFormat.rg32float,
+                    format=render_grid_format,
                     view_dimension=wgpu.TextureViewDimension.d3
                 )
             ),
@@ -375,14 +436,24 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
 
     # pipelines
 
-    compute_pipeline = device.create_compute_pipeline(
+    sim_pipeline = device.create_compute_pipeline(
         layout=device.create_pipeline_layout(
-            bind_group_layouts=[compute_bgl]
+            bind_group_layouts=[sim_bgl]
         ),
         compute=wgpu.ProgrammableStage(
             module=sim_shader,
             entry_point="cs_main"
         ),
+    )
+
+    averaging_pipeline = device.create_compute_pipeline(
+        layout=device.create_pipeline_layout(
+            bind_group_layouts=[averaging_bgl]
+        ),
+        compute=wgpu.ProgrammableStage(
+            module=averaging_shader,
+            entry_point="cs_main"
+        )
     )
 
     render_pipeline = device.create_render_pipeline(
@@ -431,14 +502,14 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
 
         # advance the simulation
         for _ in range(selected_sim_params.n_sim_steps_per_frame):
-            # update iter and time in the uniform buffer
+            # update the uniform buffer
             sim_uniform["iter"] = sim_state.iter
             sim_uniform["time"] = sim_state.time
             sim_uniform_buffer.upload()
 
-            # run the compute shader
-
             cmd_encoder = device.create_command_encoder()
+
+            # run compute shader for the simulation
 
             input_grid_view = \
                 wave_grid_a_view if sim_state.use_a_as_input else wave_grid_b_view
@@ -446,9 +517,9 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                 wave_grid_b_view if sim_state.use_a_as_input else wave_grid_a_view
 
             cpass = cmd_encoder.begin_compute_pass()
-            cpass.set_pipeline(compute_pipeline)
+            cpass.set_pipeline(sim_pipeline)
             cpass.set_bind_group(0, device.create_bind_group(
-                layout=compute_bgl,
+                layout=sim_bgl,
                 entries=[
                     wgpu.BindGroupEntry(
                         binding=0,
@@ -467,13 +538,39 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                 ],
             ))
 
-            dispatch = (
+            workgroup_count = (
                 (selected_sim_params.grid_res[0] + 7) // 8,
                 (selected_sim_params.grid_res[1] + 7) // 8,
                 (selected_sim_params.grid_res[2] + 3) // 4,
             )
-            cpass.dispatch_workgroups(*dispatch)
+            cpass.dispatch_workgroups(*workgroup_count)
             cpass.end()
+
+            # run compute shader for averaging
+            if selected_sim_params.averaging:
+                apass = cmd_encoder.begin_compute_pass()
+                apass.set_pipeline(averaging_pipeline)
+                apass.set_bind_group(0, device.create_bind_group(
+                    layout=averaging_bgl,
+                    entries=[
+                        wgpu.BindGroupEntry(
+                            binding=0,
+                            resource=wgpu.BufferBinding(
+                                buffer=sim_uniform_buffer.buf
+                            )
+                        ),
+                        wgpu.BindGroupEntry(
+                            binding=1,
+                            resource=output_grid_view
+                        ),
+                        wgpu.BindGroupEntry(
+                            binding=2,
+                            resource=wave_grid_avg_view
+                        ),
+                    ],
+                ))
+                apass.dispatch_workgroups(*workgroup_count)
+                apass.end()
 
             device.queue.submit([cmd_encoder.finish()])
 
@@ -504,8 +601,11 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
 
         # render pass
 
-        render_grid_view = \
-            wave_grid_a_view if sim_state.use_a_as_input else wave_grid_b_view
+        render_grid_view = wave_grid_b_view
+        if sim_state.use_a_as_input:
+            render_grid_view = wave_grid_a_view
+        if selected_sim_params.averaging:
+            render_grid_view = wave_grid_avg_view
 
         rpass = cmd_encoder.begin_render_pass(
             color_attachments=[

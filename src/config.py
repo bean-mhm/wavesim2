@@ -21,6 +21,22 @@ WGSL_COLORMAPS = """
         );
     }
 
+    fn colormap_exp(v: f32, rgb_fac: vec3f) -> vec3f {
+        var sq = v;
+        if (!AVERAGING) {
+            sq *= sq;
+        }
+        return vec3f(
+            1. - exp(-sq * rgb_fac.r),
+            1. - exp(-sq * rgb_fac.g),
+            1. - exp(-sq * rgb_fac.b)
+        );
+    }
+
+    fn colormap_fire(v: f32) -> vec3f {
+        return 1.5 * colormap_exp(v, vec3f(1., .15, .01));
+    }
+
     fn colormap_grayscale_positive_only(v: f32) -> vec3f {
         return vec3f(max(v, 0.));
     }
@@ -29,12 +45,12 @@ WGSL_COLORMAPS = """
         return vec3f(abs(v));
     }
 
-    fn colormap_squared_jet(v: f32) -> vec3f {
-        return vec3f(1, 0, .5) * v * v;
-    }
-
-    fn colormap_squared_grayscale(v: f32) -> vec3f {
-        return vec3f(v * v);
+    fn colormap_grayscale_squared(v: f32) -> vec3f {
+        var sq = v;
+        if (!AVERAGING) {
+            sq *= sq;
+        }
+        return vec3f(sq);
     }
 
     // https://www.desmos.com/calculator/n4mfhffj1n
@@ -46,12 +62,16 @@ WGSL_COLORMAPS = """
     }
 
     // https://www.shadertoy.com/view/DdcyRf
-    fn colormap_squared_jetski(v: f32) -> vec3f {
-        var x = v * v;
+    fn colormap_jetski(v: f32) -> vec3f {
+        var x = v;
+        if (!AVERAGING) {
+            x *= x;
+        }
+
         let t = .6 + .8 * x;
 
         // https://www.desmos.com/calculator/sdqk904uu9
-        let tone = 10. * vec3f(
+        let tone = 9. * vec3f(
             cos(6.283 * t),
             cos(6.283 * (t - .333)),
             cos(6.283 * (t - .667))
@@ -154,7 +174,8 @@ class WaveSimParams:
 
     # NOTE:
     # the following WGSL constants, uniform values, and functions are accessible
-    # in the compute shader and therefore also the WGSL functions above:
+    # in the simulation compute shader and therefore also the WGSL functions
+    # above:
     #
     # math constants
     #   PI, TAU, HALF_PI: f32
@@ -219,6 +240,19 @@ class WaveSimParams:
     # this function fetches the data stored in an arbitrary cell
     #   fn grid_fetch(icoord: vec3i) -> WaveValue {...}
 
+    # apply exponential smoothing to the field intensity (v^2, as opposed to
+    # v which is the raw amplitude) and use that for rendering instead of the
+    # raw amplitude.
+    # NOTE: this will average out the squares of the cell values, so if your
+    # shade_cell function uses a colormap that squares the value internally,
+    # make sure it only squares it if the AVERAGING constant is set to true.
+    averaging: bool
+
+    # when averaging is enabled, the averaging buffer will approach the newest
+    # values by 63% (1 - 1/e) every averaging_time_constant seconds in
+    # simulation time.
+    averaging_time_constant: float
+
     # rendering: background color
     render_bg_col: tuple[float, float, float]
 
@@ -227,13 +261,41 @@ class WaveSimParams:
     # constants and uniform values mentioned below. this function is useful for
     # colorizing the grid values with colormaps and adding visual indicators for
     # obstacles, lenses, etc.
-    #
+    render_shade_cell_function: str
+
     # NOTE:
     # the following WGSL constants, uniform values, and functions are accessible
-    # in the fragment shader and therefore in this function:
+    # in the fragment shader and therefore in render_shade_cell_function:
     #
     # math constants
     #   PI, TAU, HALF_PI: f32
+    #
+    # render target resolution
+    #   RES: vec2i
+    #
+    # same as averaging
+    #   AVERAGING: bool
+    #
+    # same as averaging_time_constant
+    #   AVERAGING_TIME_CONSTANT: AbstractFloat
+    #
+    # same as render_bg_col
+    #   BG_COL: vec3f
+    #
+    # same as render_n_samples_per_pixel
+    #   N_SAMPLES_PER_PIXEL: AbstractInt
+    #
+    # same as render_raymarch_step
+    #   RAYMARCH_STEP: AbstractFloat
+    #
+    # same as render_raymarch_step_jitter
+    #   RAYMARCH_STEP_JITTER: AbstractFloat
+    #
+    # same as render_use_trilinear
+    #   USE_TRILINEAR: bool
+    #
+    # same as render_apply_flim
+    #   APPLY_FLIM: bool
     #
     # simulation grid resolution
     #   GRID_RES: vec3i
@@ -285,8 +347,6 @@ class WaveSimParams:
     # the origin (0, 0, 0) so if e.g. GRID_DIMS=(1, 1, 1) then the coordinates
     # will range from (-0.5, -0.5, -0.5) to (+0.5, +0.5, +0.5).
     #   fn icoord_to_world(icoord: vec3i) -> vec3f {...}
-    #
-    render_shade_cell_function: str
 
     # rendering: number of jittered samples per pixel for anti-aliasing
     render_n_samples_per_pixel: int
@@ -333,6 +393,9 @@ class WaveSimLimits:
     # used internally for removing reflections at the grid boundaries
     impedance_matching_coefficient: float
 
+    # used in the averaging shader for exponential smoothing
+    averaging_mix_fac_per_dt: float
+
     def __init__(self, params: WaveSimParams):
         dimensionality = 2 if params.grid_res[2] == 1 else 3
         sqrt_dimensionality = np.sqrt(float(dimensionality))
@@ -357,6 +420,13 @@ class WaveSimLimits:
         self.impedance_matching_coefficient = \
             (params.wave_speed * self.resolved_timestep - params.cell_size) \
             / (params.wave_speed * self.resolved_timestep + params.cell_size)
+
+        if params.averaging:
+            self.averaging_mix_fac_per_dt = 1. - np.exp(
+                -self.resolved_timestep / params.averaging_time_constant
+            )
+        else:
+            self.averaging_mix_fac_per_dt = 1.
 
 
 # basic 3D simulation with a sine wave source at the center
@@ -390,6 +460,8 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     return 1.;
 }
     """,
+    averaging=False,
+    averaging_time_constant=0.,
     render_bg_col=(.02, .005, .02),
     render_shade_cell_function="""
 fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
@@ -540,14 +612,14 @@ fn initial_value(icoord: vec3i) -> WaveValue {
     update_value_function="""
 fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     if (icoord.x != GRID_RES.x / 6
-        || abs(f32(icoord.y) / f32(GRID_RES.y) - .5) > .2) {
+        || abs(f32(icoord.y) / f32(GRID_RES.y) - .5) > .3) {
         return v.curr;
     }
 
     let freq = .9 * MAX_FREQ;
-    let v_new = .6 * sin(TAU * ubo.time * freq);
+    let v_new = .8 * sin(TAU * ubo.time * freq);
 
-    let mix_factor = remap01(ubo.time, 0., 1.) * remap01(ubo.time, 5., 4.);
+    let mix_factor = remap01(ubo.time, 0., 1.) * remap01(ubo.time, 5.5, 4.5);
     return mix(
         v.curr,
         v_new,
@@ -570,10 +642,12 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     );
 }
     """,
+    averaging=False,
+    averaging_time_constant=0.,
     render_bg_col=(0., 0., 0.),
     render_shade_cell_function="""
 fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
-    return colormap_squared_jetski(v);
+    return colormap_jetski(v);
 }
     """,
     render_n_samples_per_pixel=16,
@@ -585,9 +659,16 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
 )
 
 
+# enable expoential smoothing over time
+sim9_2d_lens_with_averaging = sim8_2d_planar_wave_with_lens.__replace__(
+    averaging=True,
+    averaging_time_constant=1.
+)
+
+
 # a 2D simulation with a planar wave source and a wall with a small hole
 single_slit_condition = "abs(coord.x) < .001 && abs(coord.y) > .005"
-sim9_2d_single_slit = WaveSimParams(
+sim10_2d_single_slit = WaveSimParams(
     render_res=(960, 640),
     grid_res=(960, 640, 1),
     cell_size=.0005,
@@ -595,7 +676,7 @@ sim9_2d_single_slit = WaveSimParams(
     remove_reflections=True,
     damp_fac=.95,
     timestep=-.5,
-    n_sim_steps_per_frame=1,
+    n_sim_steps_per_frame=2,
     initial_value_function="""
 fn initial_value(icoord: vec3i) -> WaveValue {
     return WaveValue(0, 0);
@@ -628,6 +709,8 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {{
     return 1.;
 }}
     """,
+    averaging=True,
+    averaging_time_constant=1.,
     render_bg_col=(0., 0., 0.),
     render_shade_cell_function=f"""
 fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
@@ -635,7 +718,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
     if ({single_slit_condition}) {{
         return vec3f(1);
     }}
-    return colormap_squared_jetski(v);
+    return colormap_jetski(v);
 }}
     """,
     render_n_samples_per_pixel=16,
@@ -653,7 +736,7 @@ double_slit_condition = """
     && abs(coord.y - .02) > .003
     && abs(coord.y + .02) > .003
 """
-sim10_2d_double_slit = WaveSimParams(
+sim11_2d_double_slit = WaveSimParams(
     render_res=(960, 640),
     grid_res=(960, 640, 1),
     cell_size=.0005,
@@ -677,7 +760,7 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     let freq = .8 * MAX_FREQ;
     let v_new = .9 * sin(TAU * ubo.time * freq);
 
-    let mix_factor = remap01(ubo.time, 0., 1.) * remap01(ubo.time, 4., 3.5);
+    let mix_factor = remap01(ubo.time, 0., 1.) * remap01(ubo.time, 6., 5.);
     return mix(
         v.curr,
         v_new,
@@ -694,6 +777,8 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {{
     return 1.;
 }}
     """,
+    averaging=True,
+    averaging_time_constant=1.,
     render_bg_col=(0., 0., 0.),
     render_shade_cell_function=f"""
 fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
@@ -701,7 +786,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
     if ({double_slit_condition}) {{
         return vec3f(1);
     }}
-    return colormap_squared_jetski(v);
+    return colormap_jetski(v);
 }}
     """,
     render_n_samples_per_pixel=16,
@@ -713,6 +798,113 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
 )
 
 
+# 3D simulation with a planar wave source and a spherical lens
+lens_params = """
+    const LENS_CENTER = vec3f(-.05, 0, 0);
+    const LENS_RADIUS = .16;
+    const LENS_IOR = 1.12;
+"""
+sim12_3d_planar_with_lens = WaveSimParams(
+    render_res=(1280, 640),
+    grid_res=(400, 150, 200),
+    cell_size=.003,
+    wave_speed=.05,
+    remove_reflections=True,
+    damp_fac=.85,
+    timestep=-.5,
+    n_sim_steps_per_frame=2,
+    initial_value_function="""
+fn initial_value(icoord: vec3i) -> WaveValue {
+    return WaveValue(0, 0);
+}
+    """,
+    update_value_function="""
+fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
+    // planar sine wave source at the center
+
+    let coord = icoord_to_world(icoord);
+    if (icoord.x != GRID_RES.x / 8) {
+        return v.curr;
+    }
+    if (any(abs(coord.yz) > vec2f(.2, .25))) {
+        return v.curr;
+    }
+
+    let freq = .9 * MAX_FREQ;
+    let v_new = 2.5 * sin(TAU * ubo.time * freq);
+
+    return mix(
+        v.curr,
+        v_new,
+        remap01(ubo.time, 0., 4.) * remap01(ubo.time, 32., 28.)
+    );
+}
+    """,
+    speed_fac_function=f"""
+fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {{
+    {lens_params}
+    let coord = icoord_to_world(icoord);
+    return remap_clamp(
+        distance(coord, LENS_CENTER),
+        LENS_RADIUS,
+        LENS_RADIUS - .002,
+        1.,
+        1. / LENS_IOR
+    );
+}}
+    """,
+    averaging=True,
+    averaging_time_constant=1.,
+    render_bg_col=(.02, .005, .02),
+    render_shade_cell_function=f"""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
+    // highlight the edges of the volume cube
+    const EDGE_THICKNESS = 3;
+    var n_edge = 0;
+    if (icoord.x < EDGE_THICKNESS || icoord.x >= GRID_RES.x - EDGE_THICKNESS) {{
+        n_edge++;
+    }}
+    if (icoord.y < EDGE_THICKNESS || icoord.y >= GRID_RES.y - EDGE_THICKNESS) {{
+        n_edge++;
+    }}
+    if (icoord.z < EDGE_THICKNESS || icoord.z >= GRID_RES.z - EDGE_THICKNESS) {{
+        n_edge++;
+    }}
+    if (n_edge >= 2) {{
+        return vec3f(.5, 0, 3);
+    }}
+
+    var col = colormap_fire(v);
+
+    // highlight the lens
+    {lens_params}
+    let coord = icoord_to_world(icoord);
+    if (distance(coord, LENS_CENTER) < LENS_RADIUS) {{
+        col += vec3f(0, .05, .12);
+    }}
+
+    return col;
+}}
+    """,
+    render_n_samples_per_pixel=1,
+    render_raymarch_step=.02,
+    render_raymarch_step_jitter=.015,
+    render_use_trilinear=True,
+    render_camera_function=lambda params, limits, state:
+    CameraState(
+        pos=(
+            .07 * np.cos(2. * np.pi * .1 * state.time),
+            -.68,
+            .01 * np.sin(2. * np.pi * .237 * state.time),
+        ),
+        lookat=(0., 0., 0.),
+        world_up=(0., 0., 1.),
+        fov_degrees=60.
+    ),
+    render_apply_flim=True
+)
+
+
 # choose which simulation to run from above
-selected_sim_params = sim9_2d_single_slit
+selected_sim_params = sim12_3d_planar_with_lens
 selected_sim_limits = WaveSimLimits(selected_sim_params)

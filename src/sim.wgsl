@@ -1,6 +1,7 @@
 // the following will be replaced with constants
 // [constants]
 
+// NOTE: must be synced with averaging.wgsl
 struct UniformBuf {
     // simulation iteration
     iter: i32,
@@ -168,9 +169,7 @@ fn grid_write(icoord: vec3i, v: WaveValue) {
 @compute @workgroup_size(8, 8, 4)
 fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
     let icoord = vec3i(gid_u);
-    if (icoord.x >= GRID_RES.x ||
-        icoord.y >= GRID_RES.y ||
-        icoord.z >= GRID_RES.z) {
+    if (any(icoord >= GRID_RES)) {
         return;
     }
 

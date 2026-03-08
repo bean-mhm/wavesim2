@@ -31,7 +31,7 @@ fn extract_uniforms() {
 }
 
 @group(0) @binding(1)
-var render_grid: texture_storage_3d<rg32float, read>;
+var render_grid: texture_storage_3d<[render-grid-format], read>;
 
 struct VsOut {
     @builtin(position) pos: vec4f,
