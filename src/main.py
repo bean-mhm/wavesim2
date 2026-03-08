@@ -1,6 +1,8 @@
+import time
 from pathlib import Path
 from copy import deepcopy
 import numpy as np
+
 import wgpu
 from rendercanvas.pyside6 import RenderCanvas, loop
 
@@ -313,6 +315,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
     sim_uniform_dtype = np.dtype([
         ("iter", np.int32),
         ("time", np.float32),
+        ("wall_time", np.float32),
     ])
 
     sim_uniform = np.zeros((), dtype=sim_uniform_dtype)
@@ -332,6 +335,8 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         ("cam_fov_degrees", np.float32),
         ("iter", np.int32),
         ("time", np.float32),
+        ("wall_time", np.float32),
+        ("_pad", np.int32, (3,)),
     ])
 
     render_uniform = np.zeros((), dtype=render_uniform_dtype)
@@ -505,6 +510,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
             # update the uniform buffer
             sim_uniform["iter"] = sim_state.iter
             sim_uniform["time"] = sim_state.time
+            sim_uniform["wall_time"] = sim_state.wall_time
             sim_uniform_buffer.upload()
 
             cmd_encoder = device.create_command_encoder()
@@ -592,6 +598,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         render_uniform["cam_fov_degrees"] = cam_state.fov_degrees
         render_uniform["iter"] = prev_sim_state.iter
         render_uniform["time"] = prev_sim_state.time
+        render_uniform["wall_time"] = prev_sim_state.wall_time
 
         render_uniform_buffer.upload()
 

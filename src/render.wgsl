@@ -5,6 +5,7 @@ struct UniformBufRaw {
     d0: vec4f,
     d1: vec4f,
     d2: vec4f,
+    d3: vec4f,
 };
 
 struct UniformBuf {
@@ -14,6 +15,7 @@ struct UniformBuf {
     cam_fov_degrees: f32,
     iter: i32,
     time: f32,
+    wall_time: f32,
 };
 
 @group(0) @binding(0)
@@ -28,6 +30,7 @@ fn extract_uniforms() {
     ubo.cam_fov_degrees = ubo_raw.d2.y;
     ubo.iter = bitcast<i32>(ubo_raw.d2.z);
     ubo.time = ubo_raw.d2.w;
+    ubo.wall_time = ubo_raw.d3.x;
 }
 
 @group(0) @binding(1)

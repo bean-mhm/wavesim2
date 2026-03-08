@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 from collections.abc import Callable
 from copy import deepcopy
@@ -96,6 +97,10 @@ class WaveSimState:
     # simulation time
     time: float
 
+    # real world time
+    wall_time: float
+    _wall_time_start_ns: int
+
     # for double buffering (alternating between buffer A and B)
     use_a_as_input: bool
 
@@ -105,14 +110,17 @@ class WaveSimState:
     def __init__(self, timestep: float):
         self.iter = 0
         self.time = 0.
+        self.wall_time = 0.
         self.use_a_as_input = True
         self.timestep = timestep
+        self._wall_time_start_ns = time.time_ns()
 
     def advance(self, n_steps: int = 1):
         for _ in range(n_steps):
             self.use_a_as_input = not self.use_a_as_input
             self.iter += 1
             self.time = self.iter * self.timestep
+        self.wall_time = float(time.time_ns() - self._wall_time_start_ns) / 1e9
 
 
 @dataclass
@@ -221,6 +229,9 @@ class WaveSimParams:
     #
     # simulation time
     #   ubo.time: f32
+    #
+    # real world time
+    #   ubo.wall_time: f32
     #
     # used internally for removing reflections at the grid boundaries
     #   IMPEDANCE_MATCHING_COEFFICIENT: f32
@@ -338,6 +349,9 @@ class WaveSimParams:
     #
     # simulation time
     #   ubo.time: f32
+    #
+    # real world time
+    #   ubo.wall_time: f32
     #
     # used internally for removing reflections at the grid boundaries
     #   IMPEDANCE_MATCHING_COEFFICIENT: f32
@@ -488,7 +502,7 @@ sim2_box_obstacle = deepcopy(sim1_basic)
 sim2_box_obstacle.speed_fac_function = """
 fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     // add a small box-shaped obstacle
-    if (all(abs(icoord - vec3i(86, 50, 50)) <= vec3i(8, 20, 8))) {
+    if (all(abs(icoord - vec3i(86, 50, 50)) <= vec3i(10, 20, 10))) {
         return 0.;
     }
     return 1.;
@@ -502,8 +516,8 @@ sim3_rotating_camera.render_camera_function = \
     lambda params, limits, state: \
     CameraState(
         pos=(
-            1.2 * np.cos(2. * np.pi * .02 * state.time),
-            1.2 * np.sin(2. * np.pi * .02 * state.time),
+            1.2 * np.cos(2. * np.pi * .07 * state.wall_time),
+            1.2 * np.sin(2. * np.pi * .07 * state.wall_time),
             .03
         ),
         lookat=(0., 0., 0.),
@@ -802,7 +816,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
 lens_params = """
     const LENS_CENTER = vec3f(-.05, 0, 0);
     const LENS_RADIUS = .16;
-    const LENS_IOR = 1.12;
+    const LENS_IOR = 1.1;
 """
 sim12_3d_planar_with_lens = WaveSimParams(
     render_res=(1280, 640),
@@ -830,9 +844,7 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
         return v.curr;
     }
 
-    let freq = .9 * MAX_FREQ;
-    let v_new = 2.5 * sin(TAU * ubo.time * freq);
-
+    let v_new = 2.5 * sin(TAU * ubo.time * MAX_FREQ);
     return mix(
         v.curr,
         v_new,
@@ -893,9 +905,9 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
     render_camera_function=lambda params, limits, state:
     CameraState(
         pos=(
-            .07 * np.cos(2. * np.pi * .1 * state.time),
+            .07 * np.cos(2. * np.pi * .12 * state.wall_time),
             -.68,
-            .01 * np.sin(2. * np.pi * .237 * state.time),
+            .01 * np.sin(2. * np.pi * .284 * state.wall_time),
         ),
         lookat=(0., 0., 0.),
         world_up=(0., 0., 1.),

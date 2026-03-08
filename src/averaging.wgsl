@@ -3,11 +3,9 @@
 
 // NOTE: must be synced with sim.wgsl
 struct UniformBuf {
-    // simulation iteration
     iter: i32,
-
-    // simulation time
     time: f32,
+    wall_time: f32,
 };
 
 @group(0) @binding(0)
