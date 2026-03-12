@@ -161,8 +161,6 @@ const CELL_SIZE = {selected_sim_params.cell_size};
 const GRID_DIMS = vec3f{str(selected_sim_limits.grid_dims)};
 const WAVE_SPEED = {selected_sim_params.wave_speed};
 const REMOVE_REFLECTIONS = {str(selected_sim_params.remove_reflections).lower()};
-const DAMP_FAC = {selected_sim_params.damp_fac};
-const DAMP_FAC_PER_DT = {selected_sim_params.damp_fac ** selected_sim_limits.resolved_timestep};
 const TIMESTEP = {selected_sim_limits.resolved_timestep};
 const MAX_TIMESTEP = {selected_sim_limits.max_timestep};
 const MIN_WAVELENGTH = {selected_sim_limits.min_wavelength};
@@ -171,10 +169,15 @@ const IMPEDANCE_MATCHING_COEFFICIENT = {selected_sim_limits.impedance_matching_c
                 """
             ),
             (
+                "// [common-header]",
+                selected_sim_params.wgsl_common_header
+            ),
+            (
                 "// [user-functions]",
                 selected_sim_params.initial_value_function
                 + selected_sim_params.update_value_function
                 + selected_sim_params.speed_fac_function
+                + selected_sim_params.damp_fac_function
             )
         ]
     )
@@ -216,8 +219,6 @@ const CELL_SIZE = {selected_sim_params.cell_size};
 const GRID_DIMS = vec3f{str(selected_sim_limits.grid_dims)};
 const WAVE_SPEED = {selected_sim_params.wave_speed};
 const REMOVE_REFLECTIONS = {str(selected_sim_params.remove_reflections).lower()};
-const DAMP_FAC = {selected_sim_params.damp_fac};
-const DAMP_FAC_PER_DT = {selected_sim_params.damp_fac ** selected_sim_limits.resolved_timestep};
 const TIMESTEP = {selected_sim_limits.resolved_timestep};
 const MAX_TIMESTEP = {selected_sim_limits.max_timestep};
 const MIN_WAVELENGTH = {selected_sim_limits.min_wavelength};
@@ -234,8 +235,12 @@ const IMPEDANCE_MATCHING_COEFFICIENT = {selected_sim_limits.impedance_matching_c
                 WGSL_COLORMAPS
             ),
             (
+                "// [common-header]",
+                selected_sim_params.wgsl_common_header
+            ),
+            (
                 "// [user-functions]",
-                selected_sim_params.render_shade_cell_function
+                selected_sim_params.shade_cell_function
             )
         ]
     )

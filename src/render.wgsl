@@ -972,6 +972,8 @@ fn icoord_to_world(icoord: vec3i) -> vec3f {
 // the following will be replaced with colormap functions. see "config.py".
 // [colormaps]
 
+// [common-header]
+
 // the following will be replaced with a user-provided definition for the
 // function shade_cell. see "config.py".
 // [user-functions]

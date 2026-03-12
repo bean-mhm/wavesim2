@@ -11,8 +11,8 @@ WINDOW_TITLE = "wavesim2 (time: {:.3f}, iter: {})"
 # especially when we need to go to a certain line number.
 STORE_RESOLVED_SHADER_CODE = False
 
-# WGSL colormap functions used in the fragment shader, accessible from
-# WaveSimParams.render_shade_cell_function.
+# WGSL colormap functions used in the fragment shader, available in
+# WaveSimParams.shade_cell_function.
 WGSL_COLORMAPS = """
     fn colormap_simple(v: f32) -> vec3f {
         return mix(
@@ -36,6 +36,10 @@ WGSL_COLORMAPS = """
 
     fn colormap_fire(v: f32) -> vec3f {
         return 1.5 * colormap_exp(v, vec3f(1., .15, .01));
+    }
+
+    fn colormap_blood(v: f32) -> vec3f {
+        return 1.7 * colormap_exp(v, vec3f(1., .02, .01));
     }
 
     fn colormap_grayscale_positive_only(v: f32) -> vec3f {
@@ -152,9 +156,6 @@ class WaveSimParams:
     # remove reflections at the grid boundaries
     remove_reflections: bool
 
-    # dampening factor per second (stiff near zero and loose at 1)
-    damp_fac: float
-
     # delta time. if negative, will be a factor of the maximum stable timestep,
     # e.g. -0.5 means 0.5 * max_timestep. the final value can be found in
     # WaveSimLimits.resolved_timestep.
@@ -162,6 +163,11 @@ class WaveSimParams:
 
     # advance the simulation this many iterations before rendering each frame.
     n_sim_steps_per_frame: int
+
+    # user-provided WGSL code added to the simulation compute shader and the
+    # fragment shader used for rendering. useful for sharing code between
+    # simulation-related functions and the shade_cell_function.
+    wgsl_common_header: str
 
     # WGSL function used in the compute shader that defines how the grid is
     # initialized in iteration 0. the function signature must not be modified.
@@ -180,10 +186,17 @@ class WaveSimParams:
     # simulation.
     speed_fac_function: str
 
+    # WGSL function used in the compute shader returning the dampening factor
+    # per second for every cell. this factor must be in the [0, 1] range and
+    # defines how fast the wave decays in every cell. for example, a dampening
+    # factor of 0.8 for a cell means the time derivative of its wave value will
+    # be scaled by 0.8 every second in simulation time or by (0.8^timestep)
+    # every iteration.
+    damp_fac_function: str
+
     # NOTE:
-    # the following WGSL constants, uniform values, and functions are accessible
-    # in the simulation compute shader and therefore also the WGSL functions
-    # above:
+    # the following WGSL constants, uniform values, and functions are available
+    # in the simulation compute shader and therefore the WGSL functions above:
     #
     # math constants
     #   PI, TAU, HALF_PI: f32
@@ -205,12 +218,6 @@ class WaveSimParams:
     #
     # remove reflections at the grid boundaries
     #   REMOVE_REFLECTIONS: bool
-    #
-    # dampening factor per second (stiff near zero and loose at 1)
-    #   DAMP_FAC: f32
-    #
-    # dampening factor per timestep
-    #   DAMP_FAC_PER_DT: f32
     #
     # resolved timestep
     #   TIMESTEP: f32
@@ -272,11 +279,11 @@ class WaveSimParams:
     # constants and uniform values mentioned below. this function is useful for
     # colorizing the grid values with colormaps and adding visual indicators for
     # obstacles, lenses, etc.
-    render_shade_cell_function: str
+    shade_cell_function: str
 
     # NOTE:
-    # the following WGSL constants, uniform values, and functions are accessible
-    # in the fragment shader and therefore in render_shade_cell_function:
+    # the following WGSL constants, uniform values, and functions are available
+    # in the fragment shader and therefore in the shade_cell_function:
     #
     # math constants
     #   PI, TAU, HALF_PI: f32
@@ -325,12 +332,6 @@ class WaveSimParams:
     #
     # remove reflections at the grid boundaries
     #   REMOVE_REFLECTIONS: bool
-    #
-    # dampening factor per second (stiff near zero and loose at 1)
-    #   DAMP_FAC: f32
-    #
-    # dampening factor per timestep
-    #   DAMP_FAC_PER_DT: f32
     #
     # resolved timestep
     #   TIMESTEP: f32
@@ -443,6 +444,30 @@ class WaveSimLimits:
             self.averaging_mix_fac_per_dt = 1.
 
 
+def constant_initial_value_function(v: float) -> str:
+    return f"""
+fn initial_value(icoord: vec3i) -> WaveValue {{
+    return WaveValue({v}, {v});
+}}
+    """
+
+
+def constant_speed_fac_function(fac: float) -> str:
+    return f"""
+fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {{
+    return {fac};
+}}
+    """
+
+
+def constant_damp_fac_function(fac: float) -> str:
+    return f"""
+fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {{
+    return {fac};
+}}
+    """
+
+
 # basic 3D simulation with a sine wave source at the center
 sim1_basic = WaveSimParams(
     render_res=(1280, 720),
@@ -450,14 +475,10 @@ sim1_basic = WaveSimParams(
     cell_size=.01,
     wave_speed=.05,
     remove_reflections=False,
-    damp_fac=.9,
     timestep=-.5,
     n_sim_steps_per_frame=1,
-    initial_value_function="""
-fn initial_value(icoord: vec3i) -> WaveValue {
-    return WaveValue(0, 0);
-}
-    """,
+    wgsl_common_header="",
+    initial_value_function=constant_initial_value_function(0.),
     update_value_function="""
 fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     // sine wave source at the center
@@ -469,15 +490,12 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     return v.curr;
 }
     """,
-    speed_fac_function="""
-fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
-    return 1.;
-}
-    """,
+    speed_fac_function=constant_speed_fac_function(1.),
+    damp_fac_function=constant_damp_fac_function(.9),
     averaging=False,
     averaging_time_constant=0.,
     render_bg_col=(.02, .005, .02),
-    render_shade_cell_function="""
+    shade_cell_function="""
 fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     return colormap_simple(v * 4.);
 }
@@ -526,9 +544,9 @@ sim3_rotating_camera.render_camera_function = \
     )
 
 
-# make the obstacle more noticable by modifying render_shade_cell_function
+# make the obstacle more noticable by modifying shade_cell_function
 sim4_highlighted_obstacle = deepcopy(sim3_rotating_camera)
-sim4_highlighted_obstacle.render_shade_cell_function = """
+sim4_highlighted_obstacle.shade_cell_function = """
 fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     var col = colormap_simple(v * 4.);
     if (all(abs(icoord - vec3i(86, 50, 50)) <= vec3i(7, 20, 7))) {
@@ -615,14 +633,10 @@ sim8_2d_planar_wave_with_lens = WaveSimParams(
     cell_size=.001,
     wave_speed=.1,
     remove_reflections=True,
-    damp_fac=.9,
     timestep=-.5,
     n_sim_steps_per_frame=1,
-    initial_value_function="""
-fn initial_value(icoord: vec3i) -> WaveValue {
-    return WaveValue(0, 0);
-}
-    """,
+    wgsl_common_header="",
+    initial_value_function=constant_initial_value_function(0.),
     update_value_function="""
 fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     if (icoord.x != GRID_RES.x / 6
@@ -656,10 +670,22 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     );
 }
     """,
+    damp_fac_function="""
+fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
+    let coord = icoord_to_world(icoord).xy;
+
+    // more damping near the edges
+    return remap_clamp(
+        max(abs(coord.x), abs(coord.y)),
+        .2, .3,
+        .9, .05
+    );
+}
+    """,
     averaging=False,
     averaging_time_constant=0.,
     render_bg_col=(0., 0., 0.),
-    render_shade_cell_function="""
+    shade_cell_function="""
 fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     return colormap_jetski(v);
 }
@@ -681,21 +707,20 @@ sim9_2d_lens_with_averaging = sim8_2d_planar_wave_with_lens.__replace__(
 
 
 # a 2D simulation with a planar wave source and a wall with a small hole
-single_slit_condition = "abs(coord.x) < .001 && abs(coord.y) > .005"
 sim10_2d_single_slit = WaveSimParams(
     render_res=(960, 640),
     grid_res=(960, 640, 1),
     cell_size=.0005,
     wave_speed=.1,
     remove_reflections=True,
-    damp_fac=.95,
     timestep=-.5,
     n_sim_steps_per_frame=2,
-    initial_value_function="""
-fn initial_value(icoord: vec3i) -> WaveValue {
-    return WaveValue(0, 0);
+    wgsl_common_header="""
+fn inside_wall(coord: vec2f) -> bool {
+    return abs(coord.x) < .001 && abs(coord.y) > .005;
 }
     """,
+    initial_value_function=constant_initial_value_function(0.),
     update_value_function="""
 fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     if (icoord.x != GRID_RES.x / 5
@@ -714,26 +739,27 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     );
 }
     """,
-    speed_fac_function=f"""
-fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {{
+    speed_fac_function="""
+fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     let coord = icoord_to_world(icoord).xy;
-    if ({single_slit_condition}) {{
+    if (inside_wall(coord)) {
         return 0.;
-    }}
+    }
     return 1.;
-}}
+}
     """,
+    damp_fac_function=constant_damp_fac_function(.95),
     averaging=True,
     averaging_time_constant=1.,
     render_bg_col=(0., 0., 0.),
-    render_shade_cell_function=f"""
-fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
+    shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     let coord = icoord_to_world(icoord).xy;
-    if ({single_slit_condition}) {{
+    if (inside_wall(coord)) {
         return vec3f(1);
-    }}
+    }
     return colormap_jetski(v);
-}}
+}
     """,
     render_n_samples_per_pixel=16,
     render_raymarch_step=0,
@@ -744,35 +770,33 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
 )
 
 
-# a 2D simulation with a planar wave source and a wall with a small hole
-double_slit_condition = """
-    abs(coord.x) < .001
-    && abs(coord.y - .02) > .003
-    && abs(coord.y + .02) > .003
-"""
+# a 2D double-slit simulation with a damp_fac function that causes more damping
+# away from the center to avoid artifacts from removing boundary reflections.
 sim11_2d_double_slit = WaveSimParams(
     render_res=(960, 640),
     grid_res=(960, 640, 1),
     cell_size=.0005,
     wave_speed=.1,
     remove_reflections=True,
-    damp_fac=.95,
     timestep=-.5,
     n_sim_steps_per_frame=2,
-    initial_value_function="""
-fn initial_value(icoord: vec3i) -> WaveValue {
-    return WaveValue(0, 0);
+    wgsl_common_header="""
+fn inside_wall(coord: vec2f) -> bool {
+    return abs(coord.x) < .001
+        && abs(coord.y - .02) > .003
+        && abs(coord.y + .02) > .003;
 }
     """,
+    initial_value_function=constant_initial_value_function(0.),
     update_value_function="""
 fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
-    if (icoord.x != GRID_RES.x / 5
+    if (icoord.x != GRID_RES.x / 3
         || abs(f32(icoord.y) / f32(GRID_RES.y) - .5) > .3) {
         return v.curr;
     }
 
     let freq = .8 * MAX_FREQ;
-    let v_new = .9 * sin(TAU * ubo.time * freq);
+    let v_new = 1.1 * sin(TAU * ubo.time * freq);
 
     let mix_factor = remap01(ubo.time, 0., 1.) * remap01(ubo.time, 6., 5.);
     return mix(
@@ -782,26 +806,38 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     );
 }
     """,
-    speed_fac_function=f"""
-fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {{
+    speed_fac_function="""
+fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     let coord = icoord_to_world(icoord).xy;
-    if ({double_slit_condition}) {{
+    if (inside_wall(coord)) {
         return 0.;
-    }}
+    }
     return 1.;
-}}
+}
+    """,
+    damp_fac_function="""
+fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
+    let coord = icoord_to_world(icoord).xy;
+
+    // more damping away from the center
+    return remap_clamp(
+        length(coord),
+        .12, .2,
+        .95, .01
+    );
+}
     """,
     averaging=True,
     averaging_time_constant=1.,
     render_bg_col=(0., 0., 0.),
-    render_shade_cell_function=f"""
-fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
+    shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     let coord = icoord_to_world(icoord).xy;
-    if ({double_slit_condition}) {{
+    if (inside_wall(coord)) {
         return vec3f(1);
-    }}
+    }
     return colormap_jetski(v);
-}}
+}
     """,
     render_n_samples_per_pixel=16,
     render_raymarch_step=0,
@@ -813,31 +849,24 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
 
 
 # 3D simulation with a planar wave source and a spherical lens
-lens_params = """
-    const LENS_CENTER = vec3f(-.05, 0, 0);
-    const LENS_RADIUS = .16;
-    const LENS_IOR = 1.1;
-"""
 sim12_3d_planar_with_lens = WaveSimParams(
     render_res=(1280, 640),
     grid_res=(400, 150, 200),
     cell_size=.003,
     wave_speed=.05,
     remove_reflections=True,
-    damp_fac=.85,
     timestep=-.5,
     n_sim_steps_per_frame=2,
-    initial_value_function="""
-fn initial_value(icoord: vec3i) -> WaveValue {
-    return WaveValue(0, 0);
-}
+    wgsl_common_header="""
+const LENS_CENTER = vec3f(-.05, 0, 0);
+const LENS_RADIUS = .16;
+const LENS_IOR = 1.1;
     """,
+    initial_value_function=constant_initial_value_function(0.),
     update_value_function="""
 fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
-    // planar sine wave source at the center
-
     let coord = icoord_to_world(icoord);
-    if (icoord.x != GRID_RES.x / 8) {
+    if (icoord.x != GRID_RES.x / 6) {
         return v.curr;
     }
     if (any(abs(coord.yz) > vec2f(.2, .25))) {
@@ -852,9 +881,8 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     );
 }
     """,
-    speed_fac_function=f"""
-fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {{
-    {lens_params}
+    speed_fac_function="""
+fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     let coord = icoord_to_world(icoord);
     return remap_clamp(
         distance(coord, LENS_CENTER),
@@ -863,40 +891,51 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {{
         1.,
         1. / LENS_IOR
     );
-}}
+}
+    """,
+    damp_fac_function="""
+fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
+    let coord = icoord_to_world(icoord);
+
+    // more damping away from the center
+    return remap_clamp(
+        length(coord),
+        .3, .6,
+        .9, .2
+    );
+}
     """,
     averaging=True,
     averaging_time_constant=1.,
     render_bg_col=(.02, .005, .02),
-    render_shade_cell_function=f"""
-fn shade_cell(icoord: vec3i, v: f32) -> vec3f {{
+    shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     // highlight the edges of the volume cube
     const EDGE_THICKNESS = 3;
     var n_edge = 0;
-    if (icoord.x < EDGE_THICKNESS || icoord.x >= GRID_RES.x - EDGE_THICKNESS) {{
+    if (icoord.x < EDGE_THICKNESS || icoord.x >= GRID_RES.x - EDGE_THICKNESS) {
         n_edge++;
-    }}
-    if (icoord.y < EDGE_THICKNESS || icoord.y >= GRID_RES.y - EDGE_THICKNESS) {{
+    }
+    if (icoord.y < EDGE_THICKNESS || icoord.y >= GRID_RES.y - EDGE_THICKNESS) {
         n_edge++;
-    }}
-    if (icoord.z < EDGE_THICKNESS || icoord.z >= GRID_RES.z - EDGE_THICKNESS) {{
+    }
+    if (icoord.z < EDGE_THICKNESS || icoord.z >= GRID_RES.z - EDGE_THICKNESS) {
         n_edge++;
-    }}
-    if (n_edge >= 2) {{
+    }
+    if (n_edge >= 2) {
         return vec3f(.5, 0, 3);
-    }}
+    }
 
     var col = colormap_fire(v);
 
     // highlight the lens
-    {lens_params}
     let coord = icoord_to_world(icoord);
-    if (distance(coord, LENS_CENTER) < LENS_RADIUS) {{
+    if (distance(coord, LENS_CENTER) < LENS_RADIUS) {
         col += vec3f(0, .05, .12);
-    }}
+    }
 
     return col;
-}}
+}
     """,
     render_n_samples_per_pixel=1,
     render_raymarch_step=.02,

@@ -160,8 +160,11 @@ fn grid_write(icoord: vec3i, v: WaveValue) {
     textureStore(output_grid, icoord, vec4f(v.curr, v.prev, 0, 0));
 }
 
+// [common-header]
+
 // the following will be replaced with the definitions for user-provided
-// functions initial_value, update_value, and speed_fac. see "config.py".
+// functions initial_value, update_value, speed_fac, and damp_fac.
+// see "config.py".
 // [user-functions]
 
 @compute @workgroup_size(8, 8, 4)
@@ -289,7 +292,11 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
     // du/dt
     var vel = (v.curr - v.prev) / TIMESTEP;
     vel += (acc * TIMESTEP);
-    vel *= DAMP_FAC_PER_DT;
+
+    // damping
+    let damp_fac_per_sec = damp_fac(icoord, v);
+    let damp_fac_per_dt = pow(damp_fac_per_sec, TIMESTEP);
+    vel *= damp_fac_per_dt;
 
     // u
     v.prev = v.curr;
