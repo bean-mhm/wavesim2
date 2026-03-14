@@ -15,10 +15,10 @@ STORE_RESOLVED_SHADER_CODE = False
 # WaveSimParams.shade_cell_function.
 WGSL_COLORMAPS = """
     fn colormap_simple(v: f32) -> vec3f {
-        return mix(
-            vec3f(0, .4, 1) * -v,
-            vec3f(1, .4, 0) * v,
-            saturate(sign(v))
+        return select(
+            vec3f(0, .5, 1) * -v,
+            vec3f(1, .35, 0) * v,
+            v > 0.
         );
     }
 
@@ -497,7 +497,7 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     render_bg_col=(.02, .005, .02),
     shade_cell_function="""
 fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
-    return colormap_simple(v * 4.);
+    return colormap_simple(v * 5.);
 }
     """,
     render_n_samples_per_pixel=4,
@@ -517,13 +517,13 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
 
 # same as sim #1 but with a box-shaped obstacle
 sim2_box_obstacle = deepcopy(sim1_basic)
-sim2_box_obstacle.speed_fac_function = """
-fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
+sim2_box_obstacle.damp_fac_function = """
+fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     // add a small box-shaped obstacle
     if (all(abs(icoord - vec3i(86, 50, 50)) <= vec3i(10, 20, 10))) {
         return 0.;
     }
-    return 1.;
+    return .9;
 }
 """
 
@@ -626,16 +626,25 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
 """
 
 
-# a 2D simulation with a planar wave source and a circular lens
+# a 2D simulation with a planar wave source and a biconvex lens
 sim8_2d_planar_wave_with_lens = WaveSimParams(
-    render_res=(900, 750),
-    grid_res=(600, 500, 1),
+    render_res=(1200, 700),
+    grid_res=(600, 350, 1),
     cell_size=.001,
     wave_speed=.1,
     remove_reflections=True,
     timestep=-.5,
     n_sim_steps_per_frame=1,
-    wgsl_common_header="",
+    wgsl_common_header="""
+const LENS_IOR = 1.15;
+
+fn lens_sdf(coord: vec2f) -> f32 {
+    return max(
+        distance(coord, vec2f(-.16, 0)) - .1,
+        distance(coord, vec2f(0., 0)) - .12
+    );
+}
+    """,
     initial_value_function=constant_initial_value_function(0.),
     update_value_function="""
 fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
@@ -647,7 +656,7 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     let freq = .9 * MAX_FREQ;
     let v_new = .8 * sin(TAU * ubo.time * freq);
 
-    let mix_factor = remap01(ubo.time, 0., 1.) * remap01(ubo.time, 5.5, 4.5);
+    let mix_factor = remap01(ubo.time, 0., 1.) * remap01(ubo.time, 6., 5.);
     return mix(
         v.curr,
         v_new,
@@ -657,37 +666,33 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     """,
     speed_fac_function="""
 fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
-    // circular lens
-    const LENS_CENTER = vec2f(0);
-    const LENS_IOR = 1.05;
     let coord = icoord_to_world(icoord).xy;
     return remap_clamp(
-        distance(coord, LENS_CENTER),
-        .048,
-        .046,
+        lens_sdf(coord),
+        .001,
+        -.001,
         1.,
         1. / LENS_IOR
     );
 }
     """,
-    damp_fac_function="""
-fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
-    let coord = icoord_to_world(icoord).xy;
-
-    // more damping near the edges
-    return remap_clamp(
-        max(abs(coord.x), abs(coord.y)),
-        .2, .3,
-        .9, .05
-    );
-}
-    """,
+    damp_fac_function=constant_damp_fac_function(.9),
     averaging=False,
     averaging_time_constant=0.,
     render_bg_col=(0., 0., 0.),
     shade_cell_function="""
 fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
-    return colormap_jetski(v);
+    var col = colormap_jetski(v);
+
+    let coord = icoord_to_world(icoord).xy;
+    let signed_dist = lens_sdf(coord);
+    col = mix(
+        col,
+        col * vec3f(1.1, .05, .1),
+        remap_clamp(signed_dist, .001, -.001, 0., .35)
+    );
+
+    return col;
 }
     """,
     render_n_samples_per_pixel=16,
@@ -706,8 +711,25 @@ sim9_2d_lens_with_averaging = sim8_2d_planar_wave_with_lens.__replace__(
 )
 
 
+# add more damping away from the center to avoid artifacts from removing
+# boundary reflections.
+sim10_2d_lens_smooth_damping = deepcopy(sim9_2d_lens_with_averaging)
+sim10_2d_lens_smooth_damping.damp_fac_function = """
+fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
+    let coord = icoord_to_world(icoord).xy;
+
+    // more damping near the edges
+    return remap_clamp(
+        max(abs(coord.x), abs(coord.y)),
+        .2, .3,
+        .9, .05
+    );
+}
+"""
+
+
 # a 2D simulation with a planar wave source and a wall with a small hole
-sim10_2d_single_slit = WaveSimParams(
+sim11_2d_single_slit = WaveSimParams(
     render_res=(960, 640),
     grid_res=(960, 640, 1),
     cell_size=.0005,
@@ -723,7 +745,7 @@ fn inside_wall(coord: vec2f) -> bool {
     initial_value_function=constant_initial_value_function(0.),
     update_value_function="""
 fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
-    if (icoord.x != GRID_RES.x / 5
+    if (icoord.x != GRID_RES.x / 3
         || abs(f32(icoord.y) / f32(GRID_RES.y) - .5) > .3) {
         return v.curr;
     }
@@ -739,16 +761,25 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     );
 }
     """,
-    speed_fac_function="""
-fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
+    speed_fac_function=constant_speed_fac_function(1.),
+    damp_fac_function="""
+fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     let coord = icoord_to_world(icoord).xy;
+
+    // 0 inside the wall (full damping because it's an obstacle)
     if (inside_wall(coord)) {
         return 0.;
     }
-    return 1.;
+
+    // more damping away from the center to prevent artifacts from boundary
+    // reflections removal.
+    return remap_clamp(
+        length(coord),
+        .12, .2,
+        .95, .01
+    );
 }
     """,
-    damp_fac_function=constant_damp_fac_function(.95),
     averaging=True,
     averaging_time_constant=1.,
     render_bg_col=(0., 0., 0.),
@@ -770,9 +801,8 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
 )
 
 
-# a 2D double-slit simulation with a damp_fac function that causes more damping
-# away from the center to avoid artifacts from removing boundary reflections.
-sim11_2d_double_slit = WaveSimParams(
+# a 2D double-slit simulation
+sim12_2d_double_slit = WaveSimParams(
     render_res=(960, 640),
     grid_res=(960, 640, 1),
     cell_size=.0005,
@@ -806,20 +836,18 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     );
 }
     """,
-    speed_fac_function="""
-fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
-    let coord = icoord_to_world(icoord).xy;
-    if (inside_wall(coord)) {
-        return 0.;
-    }
-    return 1.;
-}
-    """,
+    speed_fac_function=constant_speed_fac_function(1.),
     damp_fac_function="""
 fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     let coord = icoord_to_world(icoord).xy;
 
-    // more damping away from the center
+    // 0 inside the wall (full damping because it's an obstacle)
+    if (inside_wall(coord)) {
+        return 0.;
+    }
+
+    // more damping away from the center to prevent artifacts from boundary
+    // reflections removal.
     return remap_clamp(
         length(coord),
         .12, .2,
@@ -849,9 +877,9 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
 
 
 # 3D simulation with a planar wave source and a spherical lens
-sim12_3d_planar_with_lens = WaveSimParams(
+sim13_3d_planar_with_lens = WaveSimParams(
     render_res=(1280, 640),
-    grid_res=(400, 150, 200),
+    grid_res=(400, 200, 200),
     cell_size=.003,
     wave_speed=.05,
     remove_reflections=True,
@@ -873,7 +901,7 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
         return v.curr;
     }
 
-    let v_new = 2.5 * sin(TAU * ubo.time * MAX_FREQ);
+    let v_new = 7. * sin(TAU * ubo.time * MAX_FREQ);
     return mix(
         v.curr,
         v_new,
@@ -900,7 +928,7 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     // more damping away from the center
     return remap_clamp(
         length(coord),
-        .3, .6,
+        .2, .6,
         .9, .2
     );
 }
@@ -957,5 +985,5 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
 
 
 # choose which simulation to run from above
-selected_sim_params = sim12_3d_planar_with_lens
+selected_sim_params = sim10_2d_lens_smooth_damping
 selected_sim_limits = WaveSimLimits(selected_sim_params)
