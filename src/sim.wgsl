@@ -244,6 +244,19 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
         }
     }
 
+    // early exit in fully damped regions (obstacles) to avoid wasting time on
+    // redundant calculations.
+    let damp_fac_per_sec = damp_fac(icoord, v);
+    if (damp_fac_per_sec == 0.) {
+        v.prev = v.curr;
+
+        // custom excitations
+        v.curr = update_value(icoord, v);
+
+        grid_write(icoord, v);
+        return;
+    }
+
     // the terms "next" and "prev" here refer to spatial offsets and have
     // nothing to do with the terms "curr" and "prev" used for temporal offsets.
     var next_in_x = 0.;
@@ -294,7 +307,6 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
     vel += (acc * TIMESTEP);
 
     // damping
-    let damp_fac_per_sec = damp_fac(icoord, v);
     let damp_fac_per_dt = pow(damp_fac_per_sec, TIMESTEP);
     vel *= damp_fac_per_dt;
 
