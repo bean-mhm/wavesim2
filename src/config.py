@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from copy import deepcopy
 import numpy as np
+import wgpu
 
 DISPLAY_SCALE = 1.
 WINDOW_TITLE = "wavesim2 (time: {:.3f}, iter: {})"
@@ -133,6 +134,16 @@ class CameraState:
     lookat: tuple[float, float, float] = (0., 0., 0.)
     world_up: tuple[float, float, float] = (0., 0., 1.)
     fov_degrees: float = 90.
+
+
+WaveSimReadbackFunction = Callable[
+    [
+        tuple[int, int, int] | None,  # pmin
+        tuple[int, int, int] | None,  # pmax
+        bool  # read_averaging_grid
+    ],
+    np.ndarray  # returned ndarray
+]
 
 
 @dataclass
@@ -387,6 +398,53 @@ class WaveSimParams:
     # rendering: whether to apply the flim view transform for prettier results.
     # see https://github.com/bean-mhm/flim
     render_apply_flim: bool
+
+    # a user-provided callback called after every iteration.
+    # example signature:
+    #   def sim_on_update(
+    #       params: WaveSimParams,
+    #       limits: WaveSimLimits,
+    #       state: WaveSimState,
+    #       readback_function: WaveSimReadbackFunction
+    #   )
+    on_update: Callable[
+        [
+            WaveSimParams,
+            WaveSimLimits,
+            WaveSimState,
+
+            # a function you may call to read back the simulation grid data to
+            # the CPU as a numpy.ndarray and do with it what you will.
+            #
+            # you must pass as arguments two tuples pmin and pmax describing
+            # which region to read from the grid. pmin and pmax are 3D integer
+            # vectors which describe the minimum and maximum indices in each
+            # axis.
+            #
+            # the third argument is a boolean defining whether to read from the
+            # averaging buffer instead of the original grid. this can only be
+            # enabled if averaging=True.
+            #
+            # NOTE: just like Python itself, negative indices will start from
+            # the end of the axis and move backward, e.g. -1 is the last element
+            # in the axis.
+            #
+            # NOTE: if pmin is None, (0, 0, 0) will be used, and if pmax is
+            # None, (grid_res.x - 1, ..., ...) will be used. therefore, you can
+            # set them both to None to read the whole grid.
+            #
+            # NOTE: in the simulation grid, each cell contains two numbers: its
+            # current value and its previous value. therefore, the last axis in
+            # the returned ndarray's shape will be 2. you can access the first
+            # element (index 0) for the current value and the second one for the
+            # previous value. this is NOT true for the averaging buffer, as it
+            # only has a single channel.
+            #
+            # NOTE: calling this every iteration will slow down the simulation.
+            WaveSimReadbackFunction
+        ],
+        None
+    ] | None = None
 
 
 class WaveSimLimits:
@@ -876,8 +934,28 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
 )
 
 
+# a 2D double-slit simulation where we read back the grid data to the CPU and
+# graph the rightmost column using matplotlib.
+def sim13_on_update(
+    params: WaveSimParams,
+    limits: WaveSimLimits,
+    state: WaveSimState,
+    readback_function: WaveSimReadbackFunction
+):
+    rightmost_column = readback_function(
+        (-1, 300, 0),
+        (-1, -300, 0),
+        True
+    )[0, :, 0]  # reshape from (1, N, 1) to (N,)
+    print(f"{rightmost_column}\n")
+
+
+sim13_cpu_readback = deepcopy(sim12_2d_double_slit)
+sim13_cpu_readback.on_update = sim13_on_update
+
+
 # 3D simulation with a planar wave source and a spherical lens
-sim13_3d_planar_with_lens = WaveSimParams(
+sim14_3d_planar_with_lens = WaveSimParams(
     render_res=(1280, 640),
     grid_res=(400, 200, 200),
     cell_size=.003,
@@ -985,5 +1063,5 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
 
 
 # choose which simulation to run from above
-selected_sim_params = sim10_2d_lens_smooth_damping
+selected_sim_params = sim13_cpu_readback
 selected_sim_limits = WaveSimLimits(selected_sim_params)

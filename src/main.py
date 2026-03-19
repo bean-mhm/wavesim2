@@ -1,6 +1,8 @@
 import time
 from pathlib import Path
 from copy import deepcopy
+from functools import reduce
+import operator
 import numpy as np
 
 import wgpu
@@ -33,6 +35,31 @@ def load_shader(
             f.close()
 
     return device.create_shader_module(code=code)
+
+
+# (re)create given buffers to make sure they exist and have enough size
+def prepare_buffers(
+    device: wgpu.GPUDevice,
+    bufs: list[wgpu.GPUBuffer | None],
+    labels: list[str],
+    usage_flags: list[wgpu.flags.BufferUsageFlags],
+    min_sizes: list[int]
+) -> list[wgpu.GPUBuffer]:
+    if len(bufs) != len(labels) or len(bufs) != len(usage_flags) \
+            or len(bufs) != len(min_sizes):
+        raise IndexError("provided lists must have identical sizes")
+
+    for i in range(len(bufs)):
+        if bufs[i] is not None and bufs[i].size >= min_sizes[i]:
+            continue
+        bufs[i] = device.create_buffer(
+            label=labels[i],
+            size=min_sizes[i],
+            usage=usage_flags[i],
+            mapped_at_creation=False
+        )
+
+    return bufs
 
 
 class DynamicUniformBuffer:
@@ -70,12 +97,12 @@ class DynamicUniformBuffer:
         if upload_at_creation:
             self.upload()
 
-    def upload(self):
+    # only pushes GPU commands, does not run them
+    def push_upload_command(self, cmd_encoder: wgpu.GPUCommandEncoder):
         self.staging_buf.map_sync(wgpu.MapMode.WRITE)
         self.staging_buf.write_mapped(self.data_view)
         self.staging_buf.unmap()
 
-        cmd_encoder = self.device.create_command_encoder()
         cmd_encoder.copy_buffer_to_buffer(
             self.staging_buf,
             0,
@@ -83,8 +110,11 @@ class DynamicUniformBuffer:
             0,
             self.data_size
         )
+
+    def upload(self):
+        cmd_encoder = self.device.create_command_encoder()
+        self.push_upload_command(cmd_encoder)
         self.device.queue.submit([cmd_encoder.finish()])
-        self.device.queue.on_submitted_work_done_sync()
 
 
 # returns the start (inclusive) and end (exclusive) offset (in bytes) of given
@@ -119,6 +149,10 @@ def field_offset_in_numpy_dtype(
     end = min(end, head)
 
     return (start, end)
+
+
+readback_dest_buf: wgpu.GPUBuffer | None = None
+readback_cpu_visible_buf: wgpu.GPUBuffer | None = None
 
 
 def main():
@@ -259,6 +293,36 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         ]
     )
 
+    grid_copy_shader = load_shader(
+        device,
+        "grid_to_buffer_copy.wgsl",
+        [
+            (
+                "[source-grid-format]",
+                wgpu.TextureFormat.rg32float
+            ),
+            (
+                "[single-channel]",
+                "false"
+            )
+        ]
+    )
+
+    grid_copy_single_channel_shader = load_shader(
+        device,
+        "grid_to_buffer_copy.wgsl",
+        [
+            (
+                "[source-grid-format]",
+                wgpu.TextureFormat.r32float
+            ),
+            (
+                "[single-channel]",
+                "true"
+            )
+        ]
+    )
+
     # create double buffered 3D textures for the simulation
 
     def create_wave_texture(
@@ -273,7 +337,8 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
             usage=(
                 wgpu.TextureUsage.TEXTURE_BINDING |
                 wgpu.TextureUsage.STORAGE_BINDING |
-                wgpu.TextureUsage.COPY_DST
+                wgpu.TextureUsage.COPY_DST |
+                wgpu.TextureUsage.COPY_SRC
             ),
         )
         v = t.create_view(label=label + " (view)")
@@ -349,6 +414,23 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         device=device,
         label="render_uniform_buffer",
         data=memoryview(render_uniform),
+        upload_at_creation=True
+    )
+
+    # uniform buffer for grid copy pipeline
+
+    grid_copy_uniform_dtype = np.dtype([
+        ("pmin", np.int32, (3,)),
+        ("_pad", np.int32),
+        ("read_res", np.int32, (3,)),
+        ("_pad2", np.int32),
+    ])
+
+    grid_copy_uniform = np.zeros((), dtype=grid_copy_uniform_dtype)
+    grid_copy_uniform_buffer = DynamicUniformBuffer(
+        device=device,
+        label="grid_copy_uniform_buffer",
+        data=memoryview(grid_copy_uniform),
         upload_at_creation=True
     )
 
@@ -444,6 +526,60 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
         ]
     )
 
+    grid_copy_bgl = device.create_bind_group_layout(
+        entries=[
+            wgpu.BindGroupLayoutEntry(
+                binding=0,
+                visibility=wgpu.ShaderStage.COMPUTE,
+                buffer=wgpu.BufferBindingLayout()
+            ),
+            wgpu.BindGroupLayoutEntry(
+                binding=1,
+                visibility=wgpu.ShaderStage.COMPUTE,
+                storage_texture=wgpu.StorageTextureBindingLayout(
+                    access=wgpu.StorageTextureAccess.read_only,
+                    format=wgpu.TextureFormat.rg32float,
+                    view_dimension=wgpu.TextureViewDimension.d3
+                )
+            ),
+            wgpu.BindGroupLayoutEntry(
+                binding=2,
+                visibility=wgpu.ShaderStage.COMPUTE,
+                buffer=wgpu.BufferBindingLayout(
+                    type=wgpu.BufferBindingType.storage
+                )
+            ),
+        ]
+    )
+
+    grid_copy_single_channel_bgl = device.create_bind_group_layout(
+        entries=[
+            wgpu.BindGroupLayoutEntry(
+                binding=0,
+                visibility=wgpu.ShaderStage.COMPUTE,
+                buffer=wgpu.BufferBindingLayout(
+                    type=wgpu.BufferBindingType.uniform
+                )
+            ),
+            wgpu.BindGroupLayoutEntry(
+                binding=1,
+                visibility=wgpu.ShaderStage.COMPUTE,
+                storage_texture=wgpu.StorageTextureBindingLayout(
+                    access=wgpu.StorageTextureAccess.read_only,
+                    format=wgpu.TextureFormat.r32float,
+                    view_dimension=wgpu.TextureViewDimension.d3
+                )
+            ),
+            wgpu.BindGroupLayoutEntry(
+                binding=2,
+                visibility=wgpu.ShaderStage.COMPUTE,
+                buffer=wgpu.BufferBindingLayout(
+                    type=wgpu.BufferBindingType.storage
+                )
+            ),
+        ]
+    )
+
     # pipelines
 
     sim_pipeline = device.create_compute_pipeline(
@@ -501,6 +637,192 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
             topology=wgpu.PrimitiveTopology.triangle_list
         ),
     )
+
+    grid_copy_pipeline = device.create_compute_pipeline(
+        layout=device.create_pipeline_layout(
+            bind_group_layouts=[grid_copy_bgl]
+        ),
+        compute=wgpu.ProgrammableStage(
+            module=grid_copy_shader,
+            entry_point="cs_main"
+        ),
+    )
+
+    grid_copy_single_channel_pipeline = device.create_compute_pipeline(
+        layout=device.create_pipeline_layout(
+            bind_group_layouts=[grid_copy_single_channel_bgl]
+        ),
+        compute=wgpu.ProgrammableStage(
+            module=grid_copy_single_channel_shader,
+            entry_point="cs_main"
+        ),
+    )
+
+    def readback_grid(
+        grid_view: wgpu.GPUTextureView,
+        pmin_unresolved: tuple[int, int, int] | None,
+        pmax_unresolved: tuple[int, int, int] | None
+    ) -> np.ndarray:
+        global readback_dest_buf, readback_cpu_visible_buf
+
+        # resolve pmin and pmax
+        if pmin_unresolved is None:
+            pmin_unresolved = (0, 0, 0)
+        if pmax_unresolved is None:
+            pmax_unresolved = tuple([
+                selected_sim_params.grid_res[i] - 1 for i in range(3)
+            ])
+        pmin = deepcopy(pmin_unresolved)
+        pmax = deepcopy(pmax_unresolved)
+        for axis in range(3):
+            # wrap negatives back to the end of the axis
+            if pmin[axis] < 0:
+                wrapped = pmin[axis] + selected_sim_params.grid_res[axis]
+                pmin = pmin[:axis] + (wrapped,) + pmin[axis+1:]
+            if pmax[axis] < 0:
+                wrapped = pmax[axis] + selected_sim_params.grid_res[axis]
+                pmax = pmax[:axis] + (wrapped,) + pmax[axis+1:]
+
+        # sanity checks
+        for axis in range(3):
+            # ordering: ensure min <= max
+            if pmin[axis] > pmax[axis]:
+                raise IndexError(
+                    f"every component in pmin ({str(pmin)}) must be less than or "
+                    f"equal to its counterpart in pmax ({str(pmax)})"
+                )
+
+            # bounds checking
+            if pmin[axis] < 0:
+                raise IndexError(
+                    f"pmin is out of bounds (pmin={str(pmin)}, grid_res="
+                    f"{str(selected_sim_params.grid_res)})"
+                )
+            if pmax[axis] >= selected_sim_params.grid_res[axis]:
+                raise IndexError(
+                    f"pmax[{axis}] is out of bounds (pmax={str(pmax)}, grid_res="
+                    f"{str(selected_sim_params.grid_res)})"
+                )
+
+        # see if grid is r32f (averaging buffer) or rg32f (regular wave grid)
+        if grid_view.texture.format == wgpu.TextureFormat.r32float:
+            single_channel = True
+        elif grid_view.texture.format == wgpu.TextureFormat.rg32float:
+            single_channel = False
+        else:
+            raise ValueError("unsupported grid format for readback")
+
+        # calculate total size
+        read_res = tuple([pmax[i] - pmin[i] + 1 for i in range(len(pmin))])
+        n_cells = reduce(operator.mul, read_res)
+        n_numbers = n_cells * 2  # current and previous value for each
+        if single_channel:
+            n_numbers = n_cells  # just current value
+        n_bytes = n_numbers * np.float32().nbytes
+
+        # prepare destination and staging buffers
+        readback_dest_buf, readback_cpu_visible_buf = prepare_buffers(
+            device,
+            [readback_dest_buf, readback_cpu_visible_buf],
+            ["readback_dest_buf", "readback_cpu_visible_buf"],
+            [
+                wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
+                wgpu.BufferUsage.MAP_READ | wgpu.BufferUsage.COPY_DST,
+            ],
+            [n_bytes, n_bytes],
+        )
+
+        # start GPU commands
+        cmd_encoder = device.create_command_encoder()
+
+        # command: update uniform buffer
+        grid_copy_uniform["pmin"] = pmin
+        grid_copy_uniform["read_res"] = read_res
+        grid_copy_uniform_buffer.push_upload_command(cmd_encoder)
+
+        # command: run compute shader for grid-to-buffer copy
+        cpass = cmd_encoder.begin_compute_pass()
+        if single_channel:
+            cpass.set_pipeline(grid_copy_single_channel_pipeline)
+            cpass.set_bind_group(0, device.create_bind_group(
+                layout=grid_copy_single_channel_bgl,
+                entries=[
+                    wgpu.BindGroupEntry(
+                        binding=0,
+                        resource=wgpu.BufferBinding(
+                            buffer=grid_copy_uniform_buffer.buf
+                        )
+                    ),
+                    wgpu.BindGroupEntry(
+                        binding=1,
+                        resource=grid_view
+                    ),
+                    wgpu.BindGroupEntry(
+                        binding=2,
+                        resource=readback_dest_buf
+                    ),
+                ],
+            ))
+        else:
+            cpass.set_pipeline(grid_copy_pipeline)
+            cpass.set_bind_group(0, device.create_bind_group(
+                layout=grid_copy_bgl,
+                entries=[
+                    wgpu.BindGroupEntry(
+                        binding=0,
+                        resource=wgpu.BufferBinding(
+                            buffer=grid_copy_uniform_buffer.buf
+                        )
+                    ),
+                    wgpu.BindGroupEntry(
+                        binding=1,
+                        resource=grid_view
+                    ),
+                    wgpu.BindGroupEntry(
+                        binding=2,
+                        resource=readback_dest_buf
+                    ),
+                ],
+            ))
+
+        workgroup_count = (
+            (read_res[0] + 7) // 8,
+            (read_res[1] + 7) // 8,
+            (read_res[2] + 3) // 4,
+        )
+        cpass.dispatch_workgroups(*workgroup_count)
+        cpass.end()
+
+        # command: copy from destination buffer to staging (CPU-visible) buffer
+        cmd_encoder.copy_buffer_to_buffer(
+            readback_dest_buf, 0,
+            readback_cpu_visible_buf, 0,
+            n_bytes
+        )
+
+        # submit the commands
+        device.queue.submit([cmd_encoder.finish()])
+
+        # read back the staging buffer
+        readback_cpu_visible_buf.map_sync(wgpu.MapMode.READ)
+        buf_copy = readback_cpu_visible_buf.read_mapped(
+            0, n_bytes, copy=True
+        )
+        readback_cpu_visible_buf.unmap()
+
+        # reinterpret as a numpy.ndarray
+        if single_channel:
+            return np.ndarray(
+                (read_res[2], read_res[1], read_res[0]),
+                dtype=np.float32,
+                buffer=buf_copy
+            )
+        else:
+            return np.ndarray(
+                (read_res[2], read_res[1], read_res[0], 2),
+                dtype=np.float32,
+                buffer=buf_copy
+            )
 
     # simulation state
     sim_state = WaveSimState(selected_sim_limits.resolved_timestep)
@@ -584,6 +906,28 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                 apass.end()
 
             device.queue.submit([cmd_encoder.finish()])
+
+            def try_get_averaging_grid_view():
+                if selected_sim_params.averaging:
+                    return wave_grid_avg_view
+                raise ValueError(
+                    "there is no averaging buffer because averaging is disabled"
+                )
+
+            # user callback
+            if selected_sim_params.on_update is not None:
+                selected_sim_params.on_update(
+                    selected_sim_params,
+                    selected_sim_limits,
+                    sim_state,
+                    lambda pmin, pmax, read_averaging_grid:
+                        readback_grid(
+                            try_get_averaging_grid_view() if read_averaging_grid
+                            else output_grid_view,
+                            pmin,
+                            pmax
+                        )
+                )
 
             # update simulation state
             prev_sim_state = deepcopy(sim_state)
