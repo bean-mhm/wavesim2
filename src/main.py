@@ -1,5 +1,3 @@
-import time
-from pathlib import Path
 from copy import deepcopy
 from functools import reduce
 import operator
@@ -8,147 +6,8 @@ import numpy as np
 import wgpu
 from rendercanvas.pyside6 import RenderCanvas, loop
 
+from common import *
 from config import *
-
-
-def load_shader(
-    device: wgpu.GPUDevice,
-    filename: str = "shader.wgsl",
-    replacements: list[tuple[str, str]] = []
-) -> wgpu.GPUShaderModule:
-
-    path = Path(__file__).parent / filename
-    if not path.exists():
-        raise FileNotFoundError(f"shader source file {path} is missing")
-
-    code = path.read_text()
-    for replacement in replacements:
-        code = code.replace(replacement[0], replacement[1])
-
-    # store the version with replacements applied (useful for debugging)
-    if STORE_RESOLVED_SHADER_CODE:
-        resolved_path = \
-            Path(__file__).parent / ".debug" / ("resolved_" + filename)
-        resolved_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(resolved_path, "w") as f:
-            f.write(code)
-            f.close()
-
-    return device.create_shader_module(code=code)
-
-
-# (re)create given buffers to make sure they exist and have enough size
-def prepare_buffers(
-    device: wgpu.GPUDevice,
-    bufs: list[wgpu.GPUBuffer | None],
-    labels: list[str],
-    usage_flags: list[wgpu.flags.BufferUsageFlags],
-    min_sizes: list[int]
-) -> list[wgpu.GPUBuffer]:
-    if len(bufs) != len(labels) or len(bufs) != len(usage_flags) \
-            or len(bufs) != len(min_sizes):
-        raise IndexError("provided lists must have identical sizes")
-
-    for i in range(len(bufs)):
-        if bufs[i] is not None and bufs[i].size >= min_sizes[i]:
-            continue
-        bufs[i] = device.create_buffer(
-            label=labels[i],
-            size=min_sizes[i],
-            usage=usage_flags[i],
-            mapped_at_creation=False
-        )
-
-    return bufs
-
-
-class DynamicUniformBuffer:
-    device: wgpu.GPUDevice
-    data_view: memoryview[int]
-    data_size: int
-    buf: wgpu.GPUBuffer
-    staging_buf: wgpu.GPUBuffer
-
-    def __init__(
-        self,
-        device: wgpu.GPUDevice,
-        label: str,
-        data: memoryview,
-        upload_at_creation: bool = True
-    ):
-        self.device = device
-        self.data_view = data.cast("B")
-        self.data_size = (self.data_view.nbytes + 3) & ~3  # 4-byte alignment
-
-        self.buf = device.create_buffer(
-            label=label,
-            size=self.data_size,
-            usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,
-            mapped_at_creation=False
-        )
-
-        self.staging_buf = device.create_buffer(
-            label=label + " (staging buffer)",
-            size=self.data_size,
-            usage=wgpu.BufferUsage.MAP_WRITE | wgpu.BufferUsage.COPY_SRC,
-            mapped_at_creation=False
-        )
-
-        if upload_at_creation:
-            self.upload()
-
-    # only pushes GPU commands, does not run them
-    def push_upload_command(self, cmd_encoder: wgpu.GPUCommandEncoder):
-        self.staging_buf.map_sync(wgpu.MapMode.WRITE)
-        self.staging_buf.write_mapped(self.data_view)
-        self.staging_buf.unmap()
-
-        cmd_encoder.copy_buffer_to_buffer(
-            self.staging_buf,
-            0,
-            self.buf,
-            0,
-            self.data_size
-        )
-
-    def upload(self):
-        cmd_encoder = self.device.create_command_encoder()
-        self.push_upload_command(cmd_encoder)
-        self.device.queue.submit([cmd_encoder.finish()])
-
-
-# returns the start (inclusive) and end (exclusive) offset (in bytes) of given
-# fields (unioned) in a numpy data structure.
-# NOTE: the fields must be in the same order as in the original numpy.dtype.
-def field_offset_in_numpy_dtype(
-    dtype: np.dtype,
-    fields: list[str],
-    alignment: int = 1
-) -> tuple[int, int]:
-    start: int = -1
-    end: int = -1
-    head: int = 0
-    for field in dtype.fields:
-        if field == fields[0] and start == -1:
-            start = head
-        if field == fields[-1]:
-            end = head + dtype[field].itemsize
-            # don't break here! we want to store the total size in "head".
-        head += dtype[field].itemsize
-
-    if start >= end:
-        raise IndexError(
-            "make sure the fields exist and are in the same order as in the "
-            "original numpy.dtype"
-        )
-
-    if alignment > 1:
-        start = start // alignment * alignment
-        end = (end + alignment - 1) // alignment * alignment
-
-    end = min(end, head)
-
-    return (start, end)
 
 
 readback_dest_buf: wgpu.GPUBuffer | None = None
@@ -266,7 +125,7 @@ const IMPEDANCE_MATCHING_COEFFICIENT = {selected_sim_limits.impedance_matching_c
             ),
             (
                 "// [colormaps]",
-                WGSL_COLORMAPS
+                load_text("colormaps.wgsl")
             ),
             (
                 "// [common-header]",
