@@ -188,7 +188,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
     // https://chatgpt.com/share/6995fcad-7f98-800b-91c2-d86b4f1551ac
     if (REMOVE_REFLECTIONS) {
         var boundary: bool = false;
-        if (icoord.x == 0) {
+        if (icoord.x == 0 && GRID_RES.x > 2) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(1, 0, 0));
             v.curr =
@@ -196,7 +196,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
                 + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
-        if (icoord.x == GRID_RES.x - 1) {
+        if (icoord.x == GRID_RES.x - 1 && GRID_RES.x > 2) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(-1, 0, 0));
             v.curr =
@@ -204,7 +204,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
                 + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
-        if (icoord.y == 0) {
+        if (icoord.y == 0 && GRID_RES.y > 2) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(0, 1, 0));
             v.curr =
@@ -212,7 +212,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
                 + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
-        if (icoord.y == GRID_RES.y - 1) {
+        if (icoord.y == GRID_RES.y - 1 && GRID_RES.y > 2) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(0, -1, 0));
             v.curr =
@@ -220,7 +220,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
                 + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
-        if (icoord.z == 0 && !IS_2D) {
+        if (icoord.z == 0 && GRID_RES.z > 2) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(0, 0, 1));
             v.curr =
@@ -228,7 +228,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
                 + IMPEDANCE_MATCHING_COEFFICIENT
                 * (neighbor.curr - v.curr);
         }
-        if (icoord.z == GRID_RES.z - 1 && !IS_2D) {
+        if (icoord.z == GRID_RES.z - 1 && GRID_RES.z > 2) {
             boundary = true;
             let neighbor = grid_fetch(icoord + vec3i(0, 0, -1));
             v.curr =
@@ -283,13 +283,17 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
     if ((icoord.z - 1) >= 0) {
         prev_in_z = grid_fetch(icoord + vec3i(0, 0, -1)).curr;
     }
-    
+
     // d2u/dx2 (but without the dx2 because it'll be applied below)
-    let grad_x = next_in_x - v.curr - v.curr + prev_in_x;
-    let grad_y = next_in_y - v.curr - v.curr + prev_in_y;
-    var grad_z: f32 = 0.;
-    if (!IS_2D) {
-        grad_z = next_in_z - v.curr - v.curr + prev_in_z;
+    var grad = vec3f(0);
+    if (GRID_RES.x > 1) {
+        grad.x = next_in_x - v.curr - v.curr + prev_in_x;
+    }
+    if (GRID_RES.y > 1) {
+        grad.y = next_in_y - v.curr - v.curr + prev_in_y;
+    }
+    if (GRID_RES.z > 1) {
+        grad.z = next_in_z - v.curr - v.curr + prev_in_z;
     }
 
     // propagation speed
@@ -298,7 +302,7 @@ fn cs_main(@builtin(global_invocation_id) gid_u: vec3u) {
 
     // d2u/dt2
     let acc =
-        (grad_x + grad_y + grad_z)  // Laplacian
+        dot(grad, vec3f(1))  // Laplacian
         * c2  // c^2
         / (CELL_SIZE * CELL_SIZE);  // dx^2
 

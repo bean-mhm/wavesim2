@@ -1,8 +1,6 @@
 struct UniformBuf {
     pmin: vec3i,
-    _pad: i32,
     read_res: vec3i, // pmax - pmin + 1
-    _pad2: i32,
 };
 
 @group(0) @binding(0)

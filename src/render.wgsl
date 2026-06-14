@@ -1,37 +1,36 @@
 // the following will be replaced with constants
 // [constants]
 
-struct UniformBufRaw {
-    d0: vec4f,
-    d1: vec4f,
-    d2: vec4f,
-    d3: vec4f,
-};
-
 struct UniformBuf {
+    res: vec2i,
+    total_res: vec2i,
+    mode: i32,
+    pmin: vec3i,
+    pmax: vec3i,
+    region_span: vec3i,
+    pmin_world: vec3f,
+    pmax_world: vec3f,
+    slice_quad_origin: vec3f,
+    slice_quad_right: vec3f,
+    slice_quad_up: vec3f,
+    slice_aspect_ratio: f32,
+    bg_col: vec3f,
+    n_samples_per_pixel: i32,
+    raymarch_step: f32,
+    raymarch_step_jitter: f32,
+    use_trilinear: i32,
     cam_pos: vec3f,
     cam_lookat: vec3f,
     cam_world_up: vec3f,
     cam_fov_degrees: f32,
+    apply_flim: i32,
     iter: i32,
     time: f32,
     wall_time: f32,
 };
 
 @group(0) @binding(0)
-var<uniform> ubo_raw: UniformBufRaw;
-var<private> ubo: UniformBuf;
-
-fn extract_uniforms() {
-    // extract uniform data (i hate stupid padding rules)
-    ubo.cam_pos = ubo_raw.d0.xyz;
-    ubo.cam_lookat = vec3f(ubo_raw.d0.w, ubo_raw.d1.xy);
-    ubo.cam_world_up = vec3f(ubo_raw.d1.zw, ubo_raw.d2.x);
-    ubo.cam_fov_degrees = ubo_raw.d2.y;
-    ubo.iter = bitcast<i32>(ubo_raw.d2.z);
-    ubo.time = ubo_raw.d2.w;
-    ubo.wall_time = ubo_raw.d3.x;
-}
+var<uniform> ubo: UniformBuf;
 
 @group(0) @binding(1)
 var render_grid: texture_storage_3d<[render-grid-format], read>;
@@ -960,8 +959,8 @@ fn flim(col_: vec3f, convert_to_srgb: bool) -> vec3f {
 /*________________ end of flim ________________*/
 
 fn screen_to_uv(frag_coord: vec2f) -> vec2f {
-    return (2. * frag_coord - vec2f(RES)) /
-           f32(min(RES.x, RES.y));
+    return (2. * frag_coord - vec2f(ubo.res)) /
+           f32(min(ubo.res.x, ubo.res.y));
 }
 
 fn icoord_to_world(icoord: vec3i) -> vec3f {
@@ -979,6 +978,9 @@ fn icoord_to_world(icoord: vec3i) -> vec3f {
 // [user-functions]
 
 fn grid_fetch(icoord: vec3i) -> vec3f {
+    if (any(icoord < ubo.pmin) || any(icoord > ubo.pmax)) {
+        return shade_cell(icoord, 0.);
+    }
     return shade_cell(
         icoord,
         textureLoad(render_grid, icoord).x
@@ -989,44 +991,7 @@ fn grid_sample(p: vec3f) -> vec3f {
     // de-center and normalize to [0, 1]
     let p_norm = p / GRID_DIMS + .5;
 
-    if (USE_TRILINEAR && IS_2D) {
-        // bottom left cell index (float)
-        let fcoord = p_norm.xy * vec2f(GRID_RES.xy) - .5;
-
-        // bottom left cell index (integer)
-        let icoord_bl = vec2i(floor(fcoord));
-
-        // blending weights
-        let weights = fract(fcoord);
-
-        // handle out-of-bounds
-        if (any(icoord_bl >= GRID_RES.xy)
-            || any((icoord_bl + 1) < vec2i(0))) {
-            return grid_fetch(vec3i(icoord_bl, 0));
-        }
-        
-        // fetch all 4 corners
-        let v00 = grid_fetch(vec3i(icoord_bl, 0));
-        let v01 = grid_fetch(vec3i(icoord_bl + vec2i(0, 1), 0));
-        let v10 = grid_fetch(vec3i(icoord_bl + vec2i(1, 0), 0));
-        let v11 = grid_fetch(vec3i(icoord_bl + vec2i(1, 1), 0));
-
-        // interpolate
-        return mix(
-            mix(
-                v00,
-                v10,
-                weights.x
-            ),
-            mix(
-                v01,
-                v11,
-                weights.x
-            ),
-            weights.y
-        );
-    }
-    else if (USE_TRILINEAR && !IS_2D) {
+    if (ubo.use_trilinear != 0) {
         // bottom back left cell index (float)
         let fcoord = p_norm * vec3f(GRID_RES) - .5;
 
@@ -1036,10 +1001,10 @@ fn grid_sample(p: vec3f) -> vec3f {
         // blending weights
         let weights = fract(fcoord);
 
-        // handle out-of-bounds
+        // early exit for out-of-bounds
         if (any(icoord_bbl >= GRID_RES)
             || any((icoord_bbl + 1) < vec3i(0))) {
-            return grid_fetch(icoord_bbl);
+            return shade_cell(icoord_bbl, 0.);
         }
         
         // fetch all 8 corners
@@ -1092,15 +1057,31 @@ fn grid_sample(p: vec3f) -> vec3f {
 }
 
 fn render(frag_coord: vec2f) -> vec3f {
-    if (IS_2D) {
+    if (ubo.mode == RENDER_MODE_SLICE) {
         let scale = min(
-            f32(RES.x) / GRID_DIMS.x,
-            f32(RES.y) / GRID_DIMS.y
+            f32(ubo.res.x) / ubo.slice_aspect_ratio,
+            f32(ubo.res.y)
         );
-        let frag_coord_centered = frag_coord - .5 * vec2f(RES);
-        let p = frag_coord_centered / scale;
-        let col = grid_sample(vec3f(p, 0));
-        return BG_COL + col;
+
+        let frag_coord_centered =
+            frag_coord - .5 * vec2f(ubo.res);
+        
+        let uv =
+            frag_coord_centered / scale / vec2f(ubo.slice_aspect_ratio, 1.)
+            + .5;
+        
+        if (any(uv < vec2f(0)) || any(uv > vec2f(1))) {
+            return ubo.bg_col;
+        }
+
+        let p =
+            ubo.slice_quad_origin
+            + uv.x * ubo.slice_quad_right
+            + uv.y * ubo.slice_quad_up;
+
+        return ubo.bg_col + grid_sample(p);
+    } else if (ubo.mode != RENDER_MODE_RAYMARCHING) {
+        return vec3f(1, 0, 1); // unsupported render mode
     }
 
     let uv = screen_to_uv(frag_coord);
@@ -1124,8 +1105,8 @@ fn render(frag_coord: vec2f) -> vec3f {
 
     // intersect container box
     var hit = ray_aabb(
-        -.5 * GRID_DIMS,
-        .5 * GRID_DIMS,
+        ubo.pmin_world,
+        ubo.pmax_world,
         ray
     );
 
@@ -1134,8 +1115,8 @@ fn render(frag_coord: vec2f) -> vec3f {
     if (hit.hit) {
         // initial t along the ray
         var step_size =
-            RAYMARCH_STEP
-            + RAYMARCH_STEP_JITTER
+            ubo.raymarch_step
+            + ubo.raymarch_step_jitter
             * (hash_3ff(vec3f(frag_coord, -777.)) - .5);
         var t = hit.tmin + step_size;
 
@@ -1156,34 +1137,40 @@ fn render(frag_coord: vec2f) -> vec3f {
 
             // step forward
             step_size =
-                RAYMARCH_STEP
-                + RAYMARCH_STEP_JITTER
+                ubo.raymarch_step
+                + ubo.raymarch_step_jitter
                 * (hash_3ff(vec3f(frag_coord, -777. + t)) - .5);
             t += step_size;
         }
     }
 
-    return BG_COL + col;
+    return ubo.bg_col + col;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
-    extract_uniforms();
-
-    let frag_coord = in.uv * vec2f(RES);
+    // get pixel coordinates and skip out-of-bounds
+    let frag_coord = in.uv * vec2f(ubo.total_res);
+    if (any(frag_coord > vec2f(ubo.res))) {
+        return vec4f(0);
+    }
 
     // multisampling
     var col = vec3f(0);
-    for (var i: i32 = 0; i < N_SAMPLES_PER_PIXEL; i++) {
-        let rand = hash_3ff(vec3f(frag_coord, f32(i + 800)));
-        let jitter = vec2f(rand, hash_1ff(rand)) - .5;
+    if (ubo.n_samples_per_pixel <= 1) {
+        col = render(frag_coord);
+    } else {
+        for (var i: i32 = 0; i < ubo.n_samples_per_pixel; i++) {
+            let rand = hash_3ff(vec3f(frag_coord, f32(i + 800)));
+            let jitter = vec2f(rand, hash_1ff(rand)) - .5;
 
-        col += render(frag_coord.xy + jitter);
+            col += render(frag_coord + jitter);
+        }
+        col /= f32(ubo.n_samples_per_pixel);
     }
-    col /= f32(N_SAMPLES_PER_PIXEL);
     
     // flim
-    if (APPLY_FLIM) {
+    if (ubo.apply_flim != 0) {
         col = flim(col, false);
     }
 

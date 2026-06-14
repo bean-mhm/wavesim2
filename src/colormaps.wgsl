@@ -11,7 +11,7 @@ fn colormap_simple(v: f32) -> vec3f {
 
 fn colormap_exp(v: f32, rgb_fac: vec3f) -> vec3f {
     var sq = v;
-    if (!AVERAGING) {
+    if (!RENDER_USES_AVERAGING_BUFFER) {
         sq *= sq;
     }
     return vec3f(
@@ -39,7 +39,7 @@ fn colormap_grayscale_abs(v: f32) -> vec3f {
 
 fn colormap_grayscale_squared(v: f32) -> vec3f {
     var sq = v;
-    if (!AVERAGING) {
+    if (!RENDER_USES_AVERAGING_BUFFER) {
         sq *= sq;
     }
     return vec3f(sq);
@@ -56,7 +56,7 @@ fn _jetski_f(x: f32, v_: f32) -> f32 {
 // https://www.shadertoy.com/view/DdcyRf
 fn colormap_jetski(v: f32) -> vec3f {
     var x = v;
-    if (!AVERAGING) {
+    if (!RENDER_USES_AVERAGING_BUFFER) {
         x *= x;
     }
 

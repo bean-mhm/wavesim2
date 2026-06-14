@@ -1,22 +1,394 @@
+import time
 from copy import deepcopy
 import numpy as np
+import matplotlib.pyplot as plt
 
 from common import *
 
 
 DISPLAY_SCALE = 1.
-WINDOW_TITLE = "wavesim2 (time: {:.3f}, iter: {})"
+
+
+basic_render_cmd = RenderCommand(
+    res=(1280, 720),
+    mode=RenderMode.Raymarching,
+    region=Aabb(),
+    try_use_averaging_buffer=True,
+    bg_col=(.02, .005, .02),
+    shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
+    return colormap_simple(v * 5.);
+}
+        """,
+    n_samples_per_pixel=4,
+    raymarch_step=.02,
+    raymarch_step_jitter=.015,
+    use_trilinear=True,
+    cam=CameraState(
+        pos=(0., -1.25, .03),
+        lookat=(0., 0., 0.),
+        world_up=(0., 0., 1.),
+        fov_degrees=70.
+    ),
+    apply_flim=True,
+    export_png_path=None
+)
+
+
+def sim_on_update_basic(
+    params: WaveSimParams,
+    limits: WaveSimLimits,
+    state: WaveSimState,
+    readback_function: WaveSimReadbackFunction
+) -> WaveSimOnUpdateReturn:
+    return WaveSimOnUpdateReturn(
+        render_commands=[basic_render_cmd],
+        display_render_idx=0,
+        should_stop=False
+    )
+
+
+def sim_on_update_rotating_camera(
+    params: WaveSimParams,
+    limits: WaveSimLimits,
+    state: WaveSimState,
+    readback_function: WaveSimReadbackFunction
+) -> WaveSimOnUpdateReturn:
+    render_cmd = basic_render_cmd.__replace__(cam=CameraState(
+        pos=(
+            1.2 * np.cos(2. * np.pi * .07 * state.wall_time),
+            1.2 * np.sin(2. * np.pi * .07 * state.wall_time),
+            .03
+        ),
+        lookat=(0., 0., 0.),
+        world_up=(0., 0., 1.),
+        fov_degrees=80.
+    ))
+
+    return WaveSimOnUpdateReturn(
+        render_commands=[render_cmd],
+        display_render_idx=0,
+        should_stop=False
+    )
+
+
+def sim_on_update_highlight_obstacle(
+    params: WaveSimParams,
+    limits: WaveSimLimits,
+    state: WaveSimState,
+    readback_function: WaveSimReadbackFunction
+) -> WaveSimOnUpdateReturn:
+    render_cmd = basic_render_cmd.__replace__(
+        cam=CameraState(
+            pos=(
+                1.2 * np.cos(2. * np.pi * .07 * state.wall_time),
+                1.2 * np.sin(2. * np.pi * .07 * state.wall_time),
+                .03
+            ),
+            lookat=(0., 0., 0.),
+            world_up=(0., 0., 1.),
+            fov_degrees=80.
+        ),
+        shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
+    var col = colormap_simple(v * 4.);
+    if (all(abs(icoord - vec3i(86, 50, 50)) <= vec3i(7, 20, 7))) {
+        col = col * .8 + vec3f(.3, 0, .35);
+    }
+    return col;
+}
+        """
+    )
+
+    return WaveSimOnUpdateReturn(
+        render_commands=[render_cmd],
+        display_render_idx=0,
+        should_stop=False
+    )
+
+
+def sim_on_update_2d_lens(
+    params: WaveSimParams,
+    limits: WaveSimLimits,
+    state: WaveSimState,
+    readback_function: WaveSimReadbackFunction
+) -> WaveSimOnUpdateReturn:
+    render_cmd = RenderCommand(
+        res=(1200, 700),
+        mode=RenderMode.Slice,
+        slice=GridSlice(),
+        bg_col=(0., 0., 0.),
+        shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
+    var col = colormap_jetski(v);
+
+    let coord = icoord_to_world(icoord).xy;
+    let signed_dist = lens_sdf(coord);
+    col = mix(
+        col,
+        col * vec3f(1.1, .05, .1),
+        remap_clamp(signed_dist, .001, -.001, 0., .35)
+    );
+
+    return col;
+}
+        """,
+        n_samples_per_pixel=1
+    )
+
+    return WaveSimOnUpdateReturn(
+        render_commands=[render_cmd],
+        display_render_idx=0,
+        should_stop=False
+    )
+
+
+def sim_on_update_2d_slit(
+    params: WaveSimParams,
+    limits: WaveSimLimits,
+    state: WaveSimState,
+    readback_function: WaveSimReadbackFunction
+) -> WaveSimOnUpdateReturn:
+    render_cmd = RenderCommand(
+        res=(1080, 720),
+        mode=RenderMode.Slice,
+        slice=GridSlice(),
+        bg_col=(0., 0., 0.),
+        shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
+    let coord = icoord_to_world(icoord).xy;
+    if (inside_wall(coord)) {
+        return vec3f(1);
+    }
+    return colormap_jetski(v);
+}
+        """,
+        n_samples_per_pixel=1
+    )
+
+    return WaveSimOnUpdateReturn(
+        # only render on even iterations
+        render_commands=[render_cmd] if state.iter % 2 == 0 else [],
+        display_render_idx=0,
+        should_stop=False
+    )
+
+
+plot_vars: dict = {}
+
+
+def setup_plot(n_points: int, title: str = ""):
+    global plot_vars
+
+    # enable interactive mode
+    plt.ion()
+
+    plot_vars["n"] = n_points
+    plot_vars["title"] = title
+    fig, plot_vars["ax"] = plt.subplots()
+    if title:
+        plot_vars["ax"].set_title(title)
+    x = np.linspace(0, n_points - 1, n_points, dtype=np.float32)
+    y = np.zeros_like(x)
+
+    # initial line
+    plot_vars["line"] = plot_vars["ax"].plot(x, y)[0]
+
+
+def plot(y: np.ndarray, title: str = ""):
+    if not plot_vars.keys() or plot_vars["n"] != y.size \
+            or plot_vars["title"] != title:
+        setup_plot(y.size, title)
+    for _ in range(plot_vars["n"]):
+        plot_vars["line"].set_ydata(y)  # update y data
+        plot_vars["ax"].relim()  # update limits
+        plot_vars["ax"].autoscale()  # rescale
+        plt.draw()  # draw
+
+
+def sim_on_update_cpu_readback(
+    params: WaveSimParams,
+    limits: WaveSimLimits,
+    state: WaveSimState,
+    readback_function: WaveSimReadbackFunction
+) -> WaveSimOnUpdateReturn:
+    # skip odd iterations
+    if state.iter % 2 != 0:
+        return WaveSimOnUpdateReturn()
+
+    # read back the rightmost column of the grid to the CPU as a numpy.ndarray
+    read_averaging_grid = True
+    rightmost_column = readback_function(
+        Aabb(
+            pmin=(-1, 0, 0),
+            pmax=(-1, -1, 0)
+        ),
+        read_averaging_grid
+    )
+
+    # reshape from (1, N, 1) to (N,)
+    rightmost_column = rightmost_column[0, :, 0]
+
+    # plot every 40 iterations
+    if state.iter % 40 == 0:
+        plot(
+            rightmost_column[100:-100],
+            "right-most column (wait for it)"
+        )
+
+    # make render command
+    render_cmd = RenderCommand(
+        res=(1080, 720),
+        mode=RenderMode.Slice,
+        slice=GridSlice(),
+        bg_col=(0., 0., 0.),
+        shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
+    let coord = icoord_to_world(icoord).xy;
+    if (inside_wall(coord)) {
+        return vec3f(1);
+    }
+    return colormap_jetski(v);
+}
+        """,
+        n_samples_per_pixel=1
+    )
+
+    return WaveSimOnUpdateReturn(
+        # render on even iterations
+        render_commands=[render_cmd] if state.iter % 2 == 0 else [],
+        display_render_idx=0,
+        should_stop=False
+    )
+
+
+def sim_on_update_3d_planar_with_lens(
+    params: WaveSimParams,
+    limits: WaveSimLimits,
+    state: WaveSimState,
+    readback_function: WaveSimReadbackFunction
+) -> WaveSimOnUpdateReturn:
+    render_cmd = basic_render_cmd.__replace__(
+        cam=CameraState(
+            pos=(
+                .07 * np.cos(2. * np.pi * .12 * state.wall_time),
+                -.68,
+                .01 * np.sin(2. * np.pi * .284 * state.wall_time),
+            ),
+            lookat=(0., 0., 0.),
+            world_up=(0., 0., 1.),
+            fov_degrees=60.
+        ),
+        shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
+    // highlight the edges of the volume cube
+    const EDGE_THICKNESS = 3;
+    var n_edge = 0;
+    if (icoord.x < EDGE_THICKNESS || icoord.x >= GRID_RES.x - EDGE_THICKNESS) {
+        n_edge++;
+    }
+    if (icoord.y < EDGE_THICKNESS || icoord.y >= GRID_RES.y - EDGE_THICKNESS) {
+        n_edge++;
+    }
+    if (icoord.z < EDGE_THICKNESS || icoord.z >= GRID_RES.z - EDGE_THICKNESS) {
+        n_edge++;
+    }
+    if (n_edge >= 2) {
+        return vec3f(.5, 0, 3);
+    }
+
+    var col = colormap_fire(v);
+
+    // highlight the lens
+    let coord = icoord_to_world(icoord);
+    if (distance(coord, LENS_CENTER) < LENS_RADIUS) {
+        col += vec3f(0, .05, .12);
+    }
+
+    return col;
+}
+        """
+    )
+
+    return WaveSimOnUpdateReturn(
+        # render every 3 iterations
+        render_commands=[render_cmd] if state.iter % 3 == 0 else [],
+        display_render_idx=0,
+        should_stop=False
+    )
+
+
+def sim_on_update_3d_hexagonal_diffraction(
+    params: WaveSimParams,
+    limits: WaveSimLimits,
+    state: WaveSimState,
+    readback_function: WaveSimReadbackFunction
+) -> WaveSimOnUpdateReturn:
+    render_cmd = RenderCommand(
+        res=(1000, 500),
+        mode=RenderMode.Raymarching,
+        region=Aabb(),
+        try_use_averaging_buffer=True,
+        bg_col=(0, 0, 0),
+        shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
+    // wall
+    let coord = icoord_to_world(icoord);
+    if (wall_sdf(coord) < 0.) {
+        return 3. * vec3f(.5, 1, .2);
+    }
+
+    var col = colormap_blood(10. * v);
+
+    let sensor_plane_x = i32(floor(mix(
+        f32(GRID_RES.x) * .25,
+        f32(GRID_RES.x) * .99,
+        cos(TAU * .05 * ubo.wall_time) * .5 + .5
+    )));
+    if (icoord.x == sensor_plane_x) {
+        return 100. * col;
+    } else {
+        return .1 * col;
+    }
+}
+        """,
+        n_samples_per_pixel=1,
+        raymarch_step=.02,
+        raymarch_step_jitter=.015,
+        use_trilinear=True,
+        cam=CameraState(
+            pos=(
+                3.,
+                -1.,
+                .01 * np.sin(2. * np.pi * .237 * state.wall_time),
+            ),
+            lookat=(
+                1.,
+                0.,
+                0.
+            ),
+            world_up=(0., 0., 1.),
+            fov_degrees=20.
+        ),
+        apply_flim=True,
+        export_png_path=None
+    )
+
+    return WaveSimOnUpdateReturn(
+        # render every 8 iterations
+        render_commands=[render_cmd] if state.iter % 8 == 0 else [],
+        display_render_idx=0,
+        should_stop=False
+    )
 
 
 # basic 3D simulation with a sine wave source at the center
 sim1_basic = WaveSimParams(
-    render_res=(1280, 720),
     grid_res=(101, 101, 101),
     cell_size=.01,
     wave_speed=.05,
     remove_reflections=False,
     timestep=-.5,
-    n_sim_steps_per_frame=1,
     wgsl_common_header="",
     initial_value_function=constant_initial_value_function(0.),
     update_value_function="""
@@ -34,24 +406,7 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     damp_fac_function=constant_damp_fac_function(.9),
     averaging=False,
     averaging_time_constant=0.,
-    render_bg_col=(.02, .005, .02),
-    shade_cell_function="""
-fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
-    return colormap_simple(v * 5.);
-}
-    """,
-    render_n_samples_per_pixel=4,
-    render_raymarch_step=.018,
-    render_raymarch_step_jitter=.015,
-    render_use_trilinear=True,
-    render_camera_function=lambda params, limits, state:
-    CameraState(
-        pos=(0., -1.25, .03),
-        lookat=(0., 0., 0.),
-        world_up=(0., 0., 1.),
-        fov_degrees=70.
-    ),
-    render_apply_flim=True
+    on_update=sim_on_update_basic
 )
 
 
@@ -68,33 +423,16 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
 """
 
 
-# same as sim #2 but with a rotating camera around the origin
-sim3_rotating_camera = deepcopy(sim2_box_obstacle)
-sim3_rotating_camera.render_camera_function = \
-    lambda params, limits, state: \
-    CameraState(
-        pos=(
-            1.2 * np.cos(2. * np.pi * .07 * state.wall_time),
-            1.2 * np.sin(2. * np.pi * .07 * state.wall_time),
-            .03
-        ),
-        lookat=(0., 0., 0.),
-        world_up=(0., 0., 1.),
-        fov_degrees=80.
-    )
+# same as sim #2 but with a spinning camera
+sim3_rotating_camera = sim2_box_obstacle.__replace__(
+    on_update=sim_on_update_rotating_camera
+)
 
 
 # make the obstacle more noticable by modifying shade_cell_function
-sim4_highlighted_obstacle = deepcopy(sim3_rotating_camera)
-sim4_highlighted_obstacle.shade_cell_function = """
-fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
-    var col = colormap_simple(v * 4.);
-    if (all(abs(icoord - vec3i(86, 50, 50)) <= vec3i(7, 20, 7))) {
-        col = col * .8 + vec3f(.3, 0, .35);
-    }
-    return col;
-}
-"""
+sim4_highlighted_obstacle = sim3_rotating_camera.__replace__(
+    on_update=sim_on_update_highlight_obstacle
+)
 
 
 # remove reflections at the boundaries
@@ -168,13 +506,11 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
 
 # a 2D simulation with a planar wave source and a biconvex lens
 sim8_2d_planar_wave_with_lens = WaveSimParams(
-    render_res=(1200, 700),
     grid_res=(600, 350, 1),
     cell_size=.001,
     wave_speed=.1,
     remove_reflections=True,
     timestep=-.5,
-    n_sim_steps_per_frame=1,
     wgsl_common_header="""
 const LENS_IOR = 1.15;
 
@@ -219,28 +555,7 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     damp_fac_function=constant_damp_fac_function(.9),
     averaging=False,
     averaging_time_constant=0.,
-    render_bg_col=(0., 0., 0.),
-    shade_cell_function="""
-fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
-    var col = colormap_jetski(v);
-
-    let coord = icoord_to_world(icoord).xy;
-    let signed_dist = lens_sdf(coord);
-    col = mix(
-        col,
-        col * vec3f(1.1, .05, .1),
-        remap_clamp(signed_dist, .001, -.001, 0., .35)
-    );
-
-    return col;
-}
-    """,
-    render_n_samples_per_pixel=16,
-    render_raymarch_step=0,
-    render_raymarch_step_jitter=0,
-    render_use_trilinear=True,
-    render_camera_function=lambda params, limits, state: CameraState(),
-    render_apply_flim=True
+    on_update=sim_on_update_2d_lens
 )
 
 
@@ -270,91 +585,14 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
 
 # a 2D simulation with a planar wave source and a wall with a small hole
 sim11_2d_single_slit = WaveSimParams(
-    render_res=(960, 640),
     grid_res=(960, 640, 1),
     cell_size=.0005,
     wave_speed=.1,
     remove_reflections=True,
-    timestep=-.5,
-    n_sim_steps_per_frame=2,
+    timestep=-.8,
     wgsl_common_header="""
 fn inside_wall(coord: vec2f) -> bool {
     return abs(coord.x) < .001 && abs(coord.y) > .005;
-}
-    """,
-    initial_value_function=constant_initial_value_function(0.),
-    update_value_function="""
-fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
-    if (icoord.x != GRID_RES.x / 3
-        || abs(f32(icoord.y) / f32(GRID_RES.y) - .5) > .3) {
-        return v.curr;
-    }
-
-    let freq = .6 * MAX_FREQ;
-    let v_new = .9 * sin(TAU * ubo.time * freq);
-
-    let mix_factor = remap01(ubo.time, 0., 1.) * remap01(ubo.time, 4., 3.5);
-    return mix(
-        v.curr,
-        v_new,
-        mix_factor
-    );
-}
-    """,
-    speed_fac_function=constant_speed_fac_function(1.),
-    damp_fac_function="""
-fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
-    let coord = icoord_to_world(icoord).xy;
-
-    // 0 inside the wall (full damping because it's an obstacle)
-    if (inside_wall(coord)) {
-        return 0.;
-    }
-
-    // more damping away from the center to prevent artifacts from boundary
-    // reflections removal.
-    return remap_clamp(
-        length(coord),
-        .12, .2,
-        .95, .01
-    );
-}
-    """,
-    averaging=True,
-    averaging_time_constant=1.,
-    render_bg_col=(0., 0., 0.),
-    shade_cell_function="""
-fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
-    let coord = icoord_to_world(icoord).xy;
-    if (inside_wall(coord)) {
-        return vec3f(1);
-    }
-    return colormap_jetski(v);
-}
-    """,
-    render_n_samples_per_pixel=16,
-    render_raymarch_step=0,
-    render_raymarch_step_jitter=0,
-    render_use_trilinear=True,
-    render_camera_function=lambda params, limits, state: CameraState(),
-    render_apply_flim=True
-)
-
-
-# a 2D double-slit simulation
-sim12_2d_double_slit = WaveSimParams(
-    render_res=(960, 640),
-    grid_res=(960, 640, 1),
-    cell_size=.0005,
-    wave_speed=.1,
-    remove_reflections=True,
-    timestep=-.5,
-    n_sim_steps_per_frame=2,
-    wgsl_common_header="""
-fn inside_wall(coord: vec2f) -> bool {
-    return abs(coord.x) < .001
-        && abs(coord.y - .02) > .003
-        && abs(coord.y + .02) > .003;
 }
     """,
     initial_value_function=constant_initial_value_function(0.),
@@ -397,54 +635,35 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     """,
     averaging=True,
     averaging_time_constant=1.,
-    render_bg_col=(0., 0., 0.),
-    shade_cell_function="""
-fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
-    let coord = icoord_to_world(icoord).xy;
-    if (inside_wall(coord)) {
-        return vec3f(1);
-    }
-    return colormap_jetski(v);
-}
-    """,
-    render_n_samples_per_pixel=16,
-    render_raymarch_step=0,
-    render_raymarch_step_jitter=0,
-    render_use_trilinear=True,
-    render_camera_function=lambda params, limits, state: CameraState(),
-    render_apply_flim=True
+    on_update=sim_on_update_2d_slit
 )
 
 
-# a 2D double-slit simulation where we read back the grid data to the CPU and
-# graph the rightmost column using matplotlib.
-def sim13_on_update(
-    params: WaveSimParams,
-    limits: WaveSimLimits,
-    state: WaveSimState,
-    readback_function: WaveSimReadbackFunction
-):
-    rightmost_column = readback_function(
-        (-1, 300, 0),
-        (-1, -300, 0),
-        True
-    )[0, :, 0]  # reshape from (1, N, 1) to (N,)
-    print(f"{rightmost_column}\n")
+# 2D double-slit simulation
+sim12_2d_double_slit = deepcopy(sim11_2d_single_slit)
+sim12_2d_double_slit.wgsl_common_header = """
+fn inside_wall(coord: vec2f) -> bool {
+    return abs(coord.x) < .001
+        && abs(coord.y - .02) > .003
+        && abs(coord.y + .02) > .003;
+}
+"""
 
 
-sim13_cpu_readback = deepcopy(sim12_2d_double_slit)
-sim13_cpu_readback.on_update = sim13_on_update
+# an example where we read back the rightmost column of the grid to the CPU as a
+# numpy.ndarray and graph it using matplotlib.
+sim13_cpu_readback_graph = sim12_2d_double_slit.__replace__(
+    on_update=sim_on_update_cpu_readback
+)
 
 
 # 3D simulation with a planar wave source and a spherical lens
 sim14_3d_planar_with_lens = WaveSimParams(
-    render_res=(1280, 640),
     grid_res=(400, 200, 200),
     cell_size=.003,
     wave_speed=.05,
     remove_reflections=True,
     timestep=-.5,
-    n_sim_steps_per_frame=2,
     wgsl_common_header="""
 const LENS_CENTER = vec3f(-.05, 0, 0);
 const LENS_RADIUS = .16;
@@ -495,55 +714,71 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     """,
     averaging=True,
     averaging_time_constant=1.,
-    render_bg_col=(.02, .005, .02),
-    shade_cell_function="""
-fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
-    // highlight the edges of the volume cube
-    const EDGE_THICKNESS = 3;
-    var n_edge = 0;
-    if (icoord.x < EDGE_THICKNESS || icoord.x >= GRID_RES.x - EDGE_THICKNESS) {
-        n_edge++;
-    }
-    if (icoord.y < EDGE_THICKNESS || icoord.y >= GRID_RES.y - EDGE_THICKNESS) {
-        n_edge++;
-    }
-    if (icoord.z < EDGE_THICKNESS || icoord.z >= GRID_RES.z - EDGE_THICKNESS) {
-        n_edge++;
-    }
-    if (n_edge >= 2) {
-        return vec3f(.5, 0, 3);
-    }
+    on_update=sim_on_update_3d_planar_with_lens
+)
 
-    var col = colormap_fire(v);
 
-    // highlight the lens
-    let coord = icoord_to_world(icoord);
-    if (distance(coord, LENS_CENTER) < LENS_RADIUS) {
-        col += vec3f(0, .05, .12);
-    }
+# 3D point source diffracting through a hexagonal hole
+sim15_3d_hexagonal_diffraction = WaveSimParams(
+    grid_res=(2000, 300, 300),
+    cell_size=.002,
+    wave_speed=.5,
+    remove_reflections=True,
+    timestep=-.8,
+    wgsl_common_header="""
+fn hexagon_sdf(p: vec2f, radius: f32) -> f32 {
+    const k = vec3f(-sqrt(3.) / 2., .5, 1. / sqrt(3.));
 
-    return col;
+    var p2 = abs(p);
+    p2 -= 2. * min(dot(k.xy, p2), 0.) * k.xy;
+    p2 -= vec2f(
+        clamp(p2.x, -k.z * radius, k.z * radius),
+        radius
+    );
+
+    return length(p2) * sign(p2.y);
+}
+
+fn wall_sdf(p: vec3f) -> f32 {
+    return max(
+        abs(p.x + 1.75) - .005,
+        -hexagon_sdf(p.yz, .23)
+    );
 }
     """,
-    render_n_samples_per_pixel=1,
-    render_raymarch_step=.02,
-    render_raymarch_step_jitter=.015,
-    render_use_trilinear=True,
-    render_camera_function=lambda params, limits, state:
-    CameraState(
-        pos=(
-            .07 * np.cos(2. * np.pi * .12 * state.wall_time),
-            -.68,
-            .01 * np.sin(2. * np.pi * .284 * state.wall_time),
-        ),
-        lookat=(0., 0., 0.),
-        world_up=(0., 0., 1.),
-        fov_degrees=60.
-    ),
-    render_apply_flim=True
+    initial_value_function=constant_initial_value_function(0.),
+    update_value_function="""
+fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
+    let coord = icoord_to_world(icoord);
+    if (icoord.x != 50) {
+        return v.curr;
+    }
+    if (any(abs(coord.yz) > vec2f(.25, .25))) {
+        return v.curr;
+    }
+
+    let v_new = 2.2 * sin(TAU * ubo.time * .9 * MAX_FREQ);
+    return mix(
+        v.curr,
+        v_new,
+        remap01(ubo.time, 0., 4.) * remap01(ubo.time, 30., 26.)
+    );
+}
+    """,
+    speed_fac_function="""
+fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
+    let coord = icoord_to_world(icoord);
+    let signed_dist = wall_sdf(coord);
+    return remap01(signed_dist, -.004, .004);
+}
+    """,
+    damp_fac_function=constant_damp_fac_function(.95),
+    averaging=True,
+    averaging_time_constant=.5,
+    on_update=sim_on_update_3d_hexagonal_diffraction
 )
 
 
 # choose which simulation to run from above
-selected_sim_params = sim13_cpu_readback
+selected_sim_params = sim15_3d_hexagonal_diffraction
 selected_sim_limits = WaveSimLimits(selected_sim_params)

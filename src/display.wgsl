@@ -1,10 +1,18 @@
 // the following will be replaced with constants
 // [constants]
 
+struct UniformBuf {
+    render_res: vec2f,
+    display_res: vec2f,
+};
+
 @group(0) @binding(0)
-var render_target: texture_2d<f32>;
+var<uniform> ubo: UniformBuf;
 
 @group(0) @binding(1)
+var render_target: texture_2d<f32>;
+
+@group(0) @binding(2)
 var linear_sampler: sampler;
 
 struct VsOut {
@@ -50,13 +58,37 @@ fn srgb_to_linear_bt709_id65(v_in: vec3f) -> vec3f {
     );
 }
 
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4f {
-    var col = textureSample(
+fn sample(coord: vec2f) -> vec3f {
+    let pixel_coord = clamp(
+        coord,
+        vec2f(.5),
+        ubo.render_res - .5
+    );
+    return textureSample(
         render_target,
         linear_sampler,
-        in.uv
+        pixel_coord / vec2f(textureDimensions(render_target))
     ).rgb;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4f {
+    let scale = min(
+        ubo.display_res.x / ubo.render_res.x,
+        ubo.display_res.y / ubo.render_res.y
+    );
+
+    let frag_coord = in.uv * ubo.display_res;
+    let frag_coord_centered =
+        frag_coord - .5 * vec2f(ubo.display_res);
+
+    let coord = frag_coord_centered / scale + .5 * ubo.render_res;
+
+    if (any(coord < vec2f(0)) || any(coord > ubo.render_res)) {
+        return vec4(0, 0, 0, 1);
+    }
+
+    var col = sample(coord);
     if (SRGB_SURFACE)
     {
         col = srgb_to_linear_bt709_id65(col);
