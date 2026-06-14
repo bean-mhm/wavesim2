@@ -325,7 +325,7 @@ def sim_on_update_3d_hexagonal_diffraction(
     readback_function: WaveSimReadbackFunction
 ) -> WaveSimOnUpdateReturn:
     render_cmd = RenderCommand(
-        res=(1000, 500),
+        res=(1280, 640),
         mode=RenderMode.Raymarching,
         region=Aabb(),
         try_use_averaging_buffer=True,
@@ -352,7 +352,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     }
 }
         """,
-        n_samples_per_pixel=1,
+        n_samples_per_pixel=2,
         raymarch_step=.02,
         raymarch_step_jitter=.015,
         use_trilinear=True,
@@ -720,11 +720,11 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
 
 # 3D point source diffracting through a hexagonal hole
 sim15_3d_hexagonal_diffraction = WaveSimParams(
-    grid_res=(2000, 300, 300),
-    cell_size=.002,
+    grid_res=(1000, 150, 150),
+    cell_size=.004,
     wave_speed=.5,
     remove_reflections=True,
-    timestep=-.8,
+    timestep=-.7,
     wgsl_common_header="""
 fn hexagon_sdf(p: vec2f, radius: f32) -> f32 {
     const k = vec3f(-sqrt(3.) / 2., .5, 1. / sqrt(3.));
