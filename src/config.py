@@ -1,7 +1,8 @@
-import time
 from copy import deepcopy
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
+from PIL import Image
 
 from common import *
 
@@ -44,6 +45,7 @@ def sim_on_update_basic(
     return WaveSimOnUpdateReturn(
         render_commands=[basic_render_cmd],
         display_render_idx=0,
+        new_user_data=None,
         should_stop=False
     )
 
@@ -68,6 +70,7 @@ def sim_on_update_rotating_camera(
     return WaveSimOnUpdateReturn(
         render_commands=[render_cmd],
         display_render_idx=0,
+        new_user_data=None,
         should_stop=False
     )
 
@@ -103,6 +106,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     return WaveSimOnUpdateReturn(
         render_commands=[render_cmd],
         display_render_idx=0,
+        new_user_data=None,
         should_stop=False
     )
 
@@ -139,6 +143,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     return WaveSimOnUpdateReturn(
         render_commands=[render_cmd],
         display_render_idx=0,
+        new_user_data=None,
         should_stop=False
     )
 
@@ -170,6 +175,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
         # only render on even iterations
         render_commands=[render_cmd] if state.iter % 2 == 0 else [],
         display_render_idx=0,
+        new_user_data=None,
         should_stop=False
     )
 
@@ -258,6 +264,35 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
         # render on even iterations
         render_commands=[render_cmd] if state.iter % 2 == 0 else [],
         display_render_idx=0,
+        new_user_data=None,
+        should_stop=False
+    )
+
+
+def sim_on_update_2d_speed_mask(
+    params: WaveSimParams,
+    limits: WaveSimLimits,
+    state: WaveSimState,
+    readback_function: WaveSimReadbackFunction
+) -> WaveSimOnUpdateReturn:
+    render_cmd = RenderCommand(
+        res=(1360, 340),
+        mode=RenderMode.Slice,
+        slice=GridSlice(),
+        bg_col=(.025, 0., .025),
+        shade_cell_function="""
+fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
+    return colormap_blood(v);
+}
+        """,
+        n_samples_per_pixel=1
+    )
+
+    return WaveSimOnUpdateReturn(
+        # only render every N iterations
+        render_commands=[render_cmd] if state.iter % 10 == 0 else [],
+        display_render_idx=0,
+        new_user_data=None,
         should_stop=False
     )
 
@@ -314,6 +349,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
         # render every 3 iterations
         render_commands=[render_cmd] if state.iter % 3 == 0 else [],
         display_render_idx=0,
+        new_user_data=None,
         should_stop=False
     )
 
@@ -378,6 +414,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
         # render every 8 iterations
         render_commands=[render_cmd] if state.iter % 8 == 0 else [],
         display_render_idx=0,
+        new_user_data=None,
         should_stop=False
     )
 
@@ -404,6 +441,8 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     """,
     speed_fac_function=constant_speed_fac_function(1.),
     damp_fac_function=constant_damp_fac_function(.9),
+    user_data_fields=None,
+    user_data=None,
     averaging=False,
     averaging_time_constant=0.,
     on_update=sim_on_update_basic
@@ -553,6 +592,8 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
 }
     """,
     damp_fac_function=constant_damp_fac_function(.9),
+    user_data_fields=None,
+    user_data=None,
     averaging=False,
     averaging_time_constant=0.,
     on_update=sim_on_update_2d_lens
@@ -633,6 +674,8 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     );
 }
     """,
+    user_data_fields=None,
+    user_data=None,
     averaging=True,
     averaging_time_constant=1.,
     on_update=sim_on_update_2d_slit
@@ -657,8 +700,88 @@ sim13_cpu_readback_graph = sim12_2d_double_slit.__replace__(
 )
 
 
+# load speed mask image for the next simulation
+speed_mask_path = Path(__file__).parent / "speed-mask.png"
+speed_mask = np.asarray(
+    Image.open(speed_mask_path).convert("RGB")
+)[::-1, :].astype(np.float32) / 255.
+speed_mask_res = (speed_mask.shape[1], speed_mask.shape[0])
+speed_mask_n_pixels = speed_mask_res[0] * speed_mask_res[1]
+
+# in the speed mask, the red channel stores wave speed factor and the green
+# channel stores 1 if that pixel is a wave source. here we find pixels whose
+# green channels are large enough and make a nice organized list.
+speed_mask_wave_sources = np.column_stack(
+    np.where(speed_mask[:, :, 1] > .99)  # green channel > 0.99
+)[:, ::-1]
+
+# sort wave sources from left to right
+speed_mask_wave_sources = speed_mask_wave_sources[
+    np.argsort(speed_mask_wave_sources[:, 0])
+]
+
+# wave source list in WGSL
+speed_mask_wave_sources_wgsl: str = ""
+for i, wave_source in enumerate(speed_mask_wave_sources):
+    if i != 0:
+        speed_mask_wave_sources_wgsl += ", "
+    speed_mask_wave_sources_wgsl += \
+        f"vec2i({int(wave_source[0])}, {int(wave_source[1])})"
+
+# extract the red channel for speed factor
+speed_mask = np.ascontiguousarray(speed_mask[:, :, 0])
+
+# 2D simulation where we send a custom image to use as the wave speed mask,
+# resulting in waves filling up a certain piece of text.
+sim14_send_user_data = WaveSimParams(
+    grid_res=(speed_mask_res[0], speed_mask_res[1], 1),
+    cell_size=.001,
+    wave_speed=1.,
+    remove_reflections=False,
+    timestep=-.95,
+    wgsl_common_header=f"""
+const IMG_RES = vec2i{speed_mask_res};
+const N_WAVE_SOURCES = {len(speed_mask_wave_sources)};
+const WAVE_SOURCES = array({speed_mask_wave_sources_wgsl});
+    """,
+    initial_value_function=constant_initial_value_function(0.),
+    update_value_function="""
+fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
+    for (var i: i32 = 0; i < N_WAVE_SOURCES; i++) {
+        let wave_source = WAVE_SOURCES[i];
+        if (any(icoord.xy != wave_source)) {
+            continue;
+        }
+
+        let v_new = 1.5 * sin(TAU * ubo.time * .9 * MAX_FREQ);
+        return mix(
+            v.curr,
+            v_new,
+            remap01(ubo.time - .05 * f32(i), 0., .2)
+        );
+    }
+    return v.curr;
+}
+    """,
+    speed_fac_function="""
+fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
+    let pixel_index = (icoord.x * 1) + (icoord.y * IMG_RES.x);
+    return user_data.pixels[pixel_index];
+}
+    """,
+    damp_fac_function=constant_damp_fac_function(1.),
+    user_data_fields=f"""
+pixels: array<f32, {speed_mask_n_pixels}>,
+    """,
+    user_data=speed_mask.data,
+    averaging=True,
+    averaging_time_constant=.002,
+    on_update=sim_on_update_2d_speed_mask
+)
+
+
 # 3D simulation with a planar wave source and a spherical lens
-sim14_3d_planar_with_lens = WaveSimParams(
+sim15_3d_planar_with_lens = WaveSimParams(
     grid_res=(400, 200, 200),
     cell_size=.003,
     wave_speed=.05,
@@ -712,6 +835,8 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     );
 }
     """,
+    user_data_fields=None,
+    user_data=None,
     averaging=True,
     averaging_time_constant=1.,
     on_update=sim_on_update_3d_planar_with_lens
@@ -719,7 +844,7 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
 
 
 # 3D point source diffracting through a hexagonal hole
-sim15_3d_hexagonal_diffraction = WaveSimParams(
+sim16_3d_hexagonal_diffraction = WaveSimParams(
     grid_res=(1000, 150, 150),
     cell_size=.004,
     wave_speed=.5,
@@ -773,6 +898,8 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
 }
     """,
     damp_fac_function=constant_damp_fac_function(.95),
+    user_data_fields=None,
+    user_data=None,
     averaging=True,
     averaging_time_constant=.5,
     on_update=sim_on_update_3d_hexagonal_diffraction
@@ -780,5 +907,5 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
 
 
 # choose which simulation to run from above
-selected_sim_params = sim15_3d_hexagonal_diffraction
+selected_sim_params = sim14_send_user_data
 selected_sim_limits = WaveSimLimits(selected_sim_params)

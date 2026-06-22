@@ -429,6 +429,9 @@ class RenderCommand:
       the origin (0, 0, 0) so if e.g. GRID_DIMS=(1, 1, 1) then the coordinates
       will range from (-0.5, -0.5, -0.5) to (+0.5, +0.5, +0.5).
         fn icoord_to_world(icoord: vec3i) -> vec3f {...}
+
+    - custom data sent from the CPU (see `WaveSimParams.user_data_fields`)
+        user_data.X
     """
 
     res: tuple[int, int] = (800, 600)
@@ -547,6 +550,17 @@ class WaveSimOnUpdateReturn(NamedTuple):
     (negative if none).
     """
 
+    new_user_data: memoryview | None = None
+    """
+    optional new value for user_data in the compute and fragment shaders. see
+    `WaveSimParams.user_data_fields` and `WaveSimParams.user_data` to learn
+    more.
+
+    NOTE: resizing is allowed and this is allowed to have a different size than
+    the original `WaveSimParams.user_data` but only if your
+    `WaveSimParams.user_data_fields` ends with a variable-length array.
+    """
+
     should_stop: bool = False
     "whether to stop the simulation"
 
@@ -617,10 +631,17 @@ class WaveSimParams:
 
     - this function fetches the data stored in an arbitrary cell
         fn grid_fetch(icoord: vec3i) -> WaveValue {...}
+
+    - custom data sent from the CPU (see `WaveSimParams.user_data_fields` to
+      learn more)
+        user_data.X
     """
 
     grid_res: tuple[int, int, int]
-    "simulation grid resolution"
+    """
+    simulation grid resolution. this is always a tuple of 3 integers, and for
+    a 2D simulation, at least one axis must be set to 1 (e.g. (500, 500, 1)).
+    """
 
     cell_size: float
     "simulation grid cell (voxel) size"
@@ -642,7 +663,7 @@ class WaveSimParams:
     """
     user-provided WGSL code added to the simulation compute shader and the
     fragment shader used for rendering. useful for sharing code between
-    simulation-related functions and shade_cell().
+    simulation-related functions (below) and shade_cell().
     """
 
     initial_value_function: str
@@ -676,6 +697,36 @@ class WaveSimParams:
     factor of 0.8 for a cell means the time derivative of its wave value will
     be scaled by 0.8 every second in simulation time or by (0.8^timestep)
     every iteration.
+    """
+
+    user_data_fields: str | None
+    """
+    optional string containing WGSL fields for sending custom data from the CPU,
+    available in both the compute and fragment shaders (and therefore
+    `wgsl_common_header`, `initial_value_function`, `shade_cell_function` in
+    `RenderCommand`, etc.) by the name `user_data` (for example,
+    `user_data.my_custom_parameter`).
+
+    the syntax is exactly the same as inside any other struct block in WGSL.
+    example:
+    ```
+        light_sensor: f32,
+        microphone_input: array<f32>  // OK: ends with a variable-length array
+    ```
+    """
+
+    user_data: memoryview | None
+    """
+    initial user data. only required if `user_data_fields` is provided. note
+    that you can update this throughout the simulation by setting
+    `new_user_data` when returning a `WaveSimOnUpdateReturn` from your
+    `on_update` function.
+
+    NOTE:
+    please read about
+    [WGSL memory alignment](https://www.w3.org/TR/WGSL/#memory-layouts) so you
+    can choose the right type, size, and ordering for your fields. also make
+    sure the total size is a multiple of 4 bytes.
     """
 
     averaging: bool
@@ -715,6 +766,19 @@ class WaveSimParams:
         ) -> WaveSimOnUpdateReturn
     ```
     """
+
+    def __deepcopy__(self, memo):
+        result = self.__class__.__new__(self.__class__)
+        memo[id(self)] = result
+
+        for name, value in self.__dict__.items():
+            # do not deepcopy memoryview objects
+            if type(value) == memoryview:
+                setattr(result, name, value)
+            else:
+                setattr(result, name, deepcopy(value, memo))
+
+        return result
 
 
 class WaveSimLimits:
@@ -909,59 +973,115 @@ def prepare_buffers(
     return bufs
 
 
-class DynamicUniformBuffer:
-    device: wgpu.GPUDevice
-    data_view: memoryview[int]
-    data_size: int
-    buf: wgpu.GPUBuffer
-    staging_buf: wgpu.GPUBuffer
+class CpuToGpuBuffer:
+    """
+    a wrapper for creating wgpu buffers where we only send data from the CPU to
+    the GPU and not the other way around.
+
+    Args:
+
+        device (wgpu.GPUDevice):
+            wgpu device
+
+        label (str):
+            buffer label used in wgpu error messages for debugging
+
+        usage (wgpu.BufferUsage):
+            buffer usage. one of `wgpu.BufferUsage.INDEX`,
+            `wgpu.BufferUsage.VERTEX`, `wgpu.BufferUsage.UNIFORM`, or
+            `wgpu.BufferUsage.STORAGE`.
+
+        data_view (memoryview):
+            a memory view to the initial data to write to the buffer.
+
+            NOTE: to avoid headaches around memory alignment, make sure the size
+            is a multiple of 4 bytes.
+    """
+
+    _device: wgpu.GPUDevice
+    _label: str
+    _usage: wgpu.BufferUsage
+
+    _data_view_i32: memoryview[int] | None = None
+    _data_size: int = 0
+    _buf: wgpu.GPUBuffer | None = None
+    _staging_buf: wgpu.GPUBuffer | None = None
+
+    @property
+    def buf(self) -> wgpu.GPUBuffer:
+        """the underlying wgpu buffer"""
+        return self._buf
 
     def __init__(
         self,
         device: wgpu.GPUDevice,
         label: str,
-        data: memoryview,
-        upload_at_creation: bool = True
+        usage: wgpu.BufferUsage,
+        data_view: memoryview
     ):
-        self.device = device
-        self.data_view = data.cast("B")
-        self.data_size = (self.data_view.nbytes + 3) & ~3  # 4-byte alignment
+        self._device = device
+        self._label = label
+        self._usage = usage
+        self.set_data_view(data_view)
+        self.upload()
 
-        self.buf = device.create_buffer(
-            label=label,
-            size=self.data_size,
-            usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,
-            mapped_at_creation=False
-        )
+    def set_data_view(self, data_view: memoryview):
+        """
+        change the memory view for your data. you don't need to call this every
+        time you change your data. it should only be called when the actual
+        object you're using to store the values (e.g. numpy struct) is now a
+        different object.
+        """
 
-        self.staging_buf = device.create_buffer(
-            label=label + " (staging buffer)",
-            size=self.data_size,
-            usage=wgpu.BufferUsage.MAP_WRITE | wgpu.BufferUsage.COPY_SRC,
-            mapped_at_creation=False
-        )
+        # prevent empty views
+        if data_view.nbytes < 1:
+            raise ValueError("set_data_view was provided an empty data_view")
 
-        if upload_at_creation:
-            self.upload()
+        # force 4-byte alignment
+        if data_view.nbytes % 4 != 0:
+            raise ValueError(
+                "the size of data_view must be a multiple of 4 bytes"
+            )
+
+        # recreate GPU buffers if needed
+        if not self._data_view_i32 or (
+            self._data_view_i32
+            and data_view.nbytes != self._data_size
+        ):
+            self._buf = self._device.create_buffer(
+                label=self._label,
+                size=data_view.nbytes,
+                usage=self._usage | wgpu.BufferUsage.COPY_DST,
+                mapped_at_creation=False
+            )
+            self._staging_buf = self._device.create_buffer(
+                label=self._label + " (staging buffer)",
+                size=data_view.nbytes,
+                usage=wgpu.BufferUsage.MAP_WRITE | wgpu.BufferUsage.COPY_SRC,
+                mapped_at_creation=False
+            )
+
+        self._data_view_i32 = data_view.cast("B")
+        self._data_size = data_view.nbytes
 
     # only pushes GPU commands, does not run them
     def push_upload_command(self, cmd_encoder: wgpu.GPUCommandEncoder):
-        self.staging_buf.map_sync(wgpu.MapMode.WRITE)
-        self.staging_buf.write_mapped(self.data_view)
-        self.staging_buf.unmap()
+        self._staging_buf.map_sync(wgpu.MapMode.WRITE)
+        self._staging_buf.write_mapped(self._data_view_i32)
+        self._staging_buf.unmap()
 
         cmd_encoder.copy_buffer_to_buffer(
-            self.staging_buf,
+            self._staging_buf,
             0,
-            self.buf,
+            self._buf,
             0,
-            self.data_size
+            self._data_size
         )
 
     def upload(self):
-        cmd_encoder = self.device.create_command_encoder()
+        cmd_encoder = self._device.create_command_encoder()
         self.push_upload_command(cmd_encoder)
-        self.device.queue.submit([cmd_encoder.finish()])
+        self._device.queue.submit([cmd_encoder.finish()])
 
 
 def field_offset_in_numpy_dtype(

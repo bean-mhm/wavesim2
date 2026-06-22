@@ -71,7 +71,8 @@ render_pipeline_map = dict[
     # mapping from
     tuple[
         bool,  # uses averaging buffer
-        str  # WGSL user functions (shade_cell)
+        str,  # WGSL user functions (shade_cell)
+        str  # WGSL UserData struct fields (for sending custom data from CPU)
     ],
 
     # to
@@ -85,7 +86,9 @@ MAX_RENDER_PIPELINE_MAP_LEN: int = 64
 
 def get_render_pipeline(
     uses_avg_buf: bool,
-    wgsl_user_functions: str
+    wgsl_user_functions: str,
+    user_data_decl: str,
+    have_user_data: bool
 ) -> tuple[wgpu.GPUBindGroupLayout, wgpu.GPURenderPipeline]:
     """
     return render pipeline matching given grid format and WGSL user functions
@@ -125,6 +128,10 @@ const RENDER_USES_AVERAGING_BUFFER = {str(uses_avg_buf).lower()};
                 render_grid_format
             ),
             (
+                "// [user-data-decl]",
+                user_data_decl.replace("@binding(N)", "@binding(2)")
+            ),
+            (
                 "// [colormaps]",
                 load_text("colormaps.wgsl")
             ),
@@ -139,24 +146,31 @@ const RENDER_USES_AVERAGING_BUFFER = {str(uses_avg_buf).lower()};
         ]
     )
 
-    bgl = device.create_bind_group_layout(
-        entries=[
-            wgpu.BindGroupLayoutEntry(
-                binding=0,
-                visibility=wgpu.ShaderStage.FRAGMENT,
-                buffer=wgpu.BufferBindingLayout()
-            ),
-            wgpu.BindGroupLayoutEntry(
-                binding=1,
-                visibility=wgpu.ShaderStage.FRAGMENT,
-                storage_texture=wgpu.StorageTextureBindingLayout(
-                    access=wgpu.StorageTextureAccess.read_only,
-                    format=render_grid_format,
-                    view_dimension=wgpu.TextureViewDimension.d3
-                )
-            ),
-        ]
-    )
+    entries = [
+        wgpu.BindGroupLayoutEntry(
+            binding=0,
+            visibility=wgpu.ShaderStage.FRAGMENT,
+            buffer=wgpu.BufferBindingLayout()
+        ),
+        wgpu.BindGroupLayoutEntry(
+            binding=1,
+            visibility=wgpu.ShaderStage.FRAGMENT,
+            storage_texture=wgpu.StorageTextureBindingLayout(
+                access=wgpu.StorageTextureAccess.read_only,
+                format=render_grid_format,
+                view_dimension=wgpu.TextureViewDimension.d3
+            )
+        ),
+    ]
+    if have_user_data:
+        entries.append(wgpu.BindGroupLayoutEntry(
+            binding=2,
+            visibility=wgpu.ShaderStage.FRAGMENT,
+            buffer=wgpu.BufferBindingLayout(
+                type=wgpu.BufferBindingType.read_only_storage
+            )
+        ))
+    bgl = device.create_bind_group_layout(entries=entries)
 
     pipeline = device.create_render_pipeline(
         layout=device.create_pipeline_layout(
@@ -206,6 +220,17 @@ def main():
 
     # shaders
 
+    user_data_decl: str = "// no user data"
+    if selected_sim_params.user_data_fields:
+        user_data_decl = \
+            f"""
+struct UserData {{
+    {selected_sim_params.user_data_fields}
+}}
+@group(0) @binding(N)
+var<storage, read> user_data: UserData;
+            """
+
     sim_shader = load_shader(
         device,
         "sim.wgsl",
@@ -213,6 +238,10 @@ def main():
             (
                 "// [constants]",
                 wgsl_sim_constants
+            ),
+            (
+                "// [user-data-decl]",
+                user_data_decl.replace("@binding(N)", "@binding(3)")
             ),
             (
                 "// [common-header]",
@@ -339,11 +368,11 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
     ])
 
     sim_uniform = np.zeros((), dtype=sim_uniform_dtype)
-    sim_uniform_buffer = DynamicUniformBuffer(
+    sim_uniform_buffer = CpuToGpuBuffer(
         device=device,
         label="sim_uniform_buffer",
-        data=memoryview(sim_uniform),
-        upload_at_creation=True
+        usage=wgpu.BufferUsage.UNIFORM,
+        data_view=memoryview(sim_uniform)
     )
 
     # uniform buffer for render pipeline
@@ -388,11 +417,11 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
     ])
 
     render_uniform = np.zeros((), dtype=render_uniform_dtype)
-    render_uniform_buffer = DynamicUniformBuffer(
+    render_uniform_buffer = CpuToGpuBuffer(
         device=device,
         label="render_uniform_buffer",
-        data=memoryview(render_uniform),
-        upload_at_creation=True
+        usage=wgpu.BufferUsage.UNIFORM,
+        data_view=memoryview(render_uniform)
     )
 
     # uniform buffer for display pipeline
@@ -403,11 +432,11 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
     ])
 
     display_uniform = np.zeros((), dtype=display_uniform_dtype)
-    display_uniform_buffer = DynamicUniformBuffer(
+    display_uniform_buffer = CpuToGpuBuffer(
         device=device,
         label="display_uniform_buffer",
-        data=memoryview(display_uniform),
-        upload_at_creation=True
+        usage=wgpu.BufferUsage.UNIFORM,
+        data_view=memoryview(display_uniform)
     )
 
     # uniform buffer for grid copy pipeline
@@ -420,42 +449,63 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
     ])
 
     grid_copy_uniform = np.zeros((), dtype=grid_copy_uniform_dtype)
-    grid_copy_uniform_buffer = DynamicUniformBuffer(
+    grid_copy_uniform_buffer = CpuToGpuBuffer(
         device=device,
         label="grid_copy_uniform_buffer",
-        data=memoryview(grid_copy_uniform),
-        upload_at_creation=True
+        usage=wgpu.BufferUsage.UNIFORM,
+        data_view=memoryview(grid_copy_uniform)
     )
+
+    # user data buffer
+    user_data_buffer: CpuToGpuBuffer | None = None
+    if selected_sim_params.user_data_fields:
+        if not selected_sim_params.user_data:
+            raise ValueError(
+                "user_data_fields is provided but user_data is not"
+            )
+        user_data_buffer = CpuToGpuBuffer(
+            device=device,
+            label="user_data_buffer",
+            usage=wgpu.BufferUsage.STORAGE,
+            data_view=selected_sim_params.user_data
+        )
 
     # bind group layouts
 
-    sim_bgl = device.create_bind_group_layout(
-        entries=[
-            wgpu.BindGroupLayoutEntry(
-                binding=0,
-                visibility=wgpu.ShaderStage.COMPUTE,
-                buffer=wgpu.BufferBindingLayout()
-            ),
-            wgpu.BindGroupLayoutEntry(
-                binding=1,
-                visibility=wgpu.ShaderStage.COMPUTE,
-                storage_texture=wgpu.StorageTextureBindingLayout(
-                    access=wgpu.StorageTextureAccess.read_only,
-                    format=wgpu.TextureFormat.rg32float,
-                    view_dimension=wgpu.TextureViewDimension.d3
-                )
-            ),
-            wgpu.BindGroupLayoutEntry(
-                binding=2,
-                visibility=wgpu.ShaderStage.COMPUTE,
-                storage_texture=wgpu.StorageTextureBindingLayout(
-                    access=wgpu.StorageTextureAccess.write_only,
-                    format=wgpu.TextureFormat.rg32float,
-                    view_dimension=wgpu.TextureViewDimension.d3
-                )
-            ),
-        ]
-    )
+    entries = [
+        wgpu.BindGroupLayoutEntry(
+            binding=0,
+            visibility=wgpu.ShaderStage.COMPUTE,
+            buffer=wgpu.BufferBindingLayout()
+        ),
+        wgpu.BindGroupLayoutEntry(
+            binding=1,
+            visibility=wgpu.ShaderStage.COMPUTE,
+            storage_texture=wgpu.StorageTextureBindingLayout(
+                access=wgpu.StorageTextureAccess.read_only,
+                format=wgpu.TextureFormat.rg32float,
+                view_dimension=wgpu.TextureViewDimension.d3
+            )
+        ),
+        wgpu.BindGroupLayoutEntry(
+            binding=2,
+            visibility=wgpu.ShaderStage.COMPUTE,
+            storage_texture=wgpu.StorageTextureBindingLayout(
+                access=wgpu.StorageTextureAccess.write_only,
+                format=wgpu.TextureFormat.rg32float,
+                view_dimension=wgpu.TextureViewDimension.d3
+            )
+        ),
+    ]
+    if user_data_buffer:
+        entries.append(wgpu.BindGroupLayoutEntry(
+            binding=3,
+            visibility=wgpu.ShaderStage.COMPUTE,
+            buffer=wgpu.BufferBindingLayout(
+                type=wgpu.BufferBindingType.read_only_storage
+            )
+        ))
+    sim_bgl = device.create_bind_group_layout(entries=entries)
 
     averaging_bgl = device.create_bind_group_layout(
         entries=[
@@ -684,7 +734,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                         binding=2,
                         resource=readback_dest_buf
                     ),
-                ],
+                ]
             ))
         else:
             cpass.set_pipeline(grid_copy_pipeline)
@@ -705,7 +755,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                         binding=2,
                         resource=readback_dest_buf
                     ),
-                ],
+                ]
             ))
 
         workgroup_count = (
@@ -754,7 +804,8 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
     # per-frame logic
     def draw():
         global device, render_target, render_target_view, cpu_visible_buf
-        nonlocal canvas, context, surface_format, sim_state, prev_sim_state
+        nonlocal canvas, context, surface_format, sim_state, prev_sim_state, \
+            user_data_buffer
 
         # advance the simulation
 
@@ -775,24 +826,31 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
 
         cpass = cmd_encoder.begin_compute_pass()
         cpass.set_pipeline(sim_pipeline)
+
+        entries = [
+            wgpu.BindGroupEntry(
+                binding=0,
+                resource=wgpu.BufferBinding(
+                    buffer=sim_uniform_buffer.buf
+                )
+            ),
+            wgpu.BindGroupEntry(
+                binding=1,
+                resource=input_grid_view
+            ),
+            wgpu.BindGroupEntry(
+                binding=2,
+                resource=output_grid_view
+            ),
+        ]
+        if user_data_buffer:
+            entries.append(wgpu.BindGroupEntry(
+                binding=3,
+                resource=user_data_buffer.buf
+            ))
         cpass.set_bind_group(0, device.create_bind_group(
             layout=sim_bgl,
-            entries=[
-                wgpu.BindGroupEntry(
-                    binding=0,
-                    resource=wgpu.BufferBinding(
-                        buffer=sim_uniform_buffer.buf
-                    )
-                ),
-                wgpu.BindGroupEntry(
-                    binding=1,
-                    resource=input_grid_view
-                ),
-                wgpu.BindGroupEntry(
-                    binding=2,
-                    resource=output_grid_view
-                ),
-            ],
+            entries=entries
         ))
 
         workgroup_count = (
@@ -824,7 +882,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                         binding=2,
                         resource=wave_grid_avg_view
                     ),
-                ],
+                ]
             ))
             apass.dispatch_workgroups(*workgroup_count)
             apass.end()
@@ -849,7 +907,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
             )
 
         # user callback
-        render_commands, display_render_idx, should_stop = \
+        render_commands, display_render_idx, new_user_data, should_stop = \
             selected_sim_params.on_update(
                 selected_sim_params,
                 selected_sim_limits,
@@ -861,6 +919,11 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                         region
                     )
             )
+
+        # update user data buffer if needed
+        if new_user_data:
+            user_data_buffer.set_data_view(new_user_data)
+            user_data_buffer.upload()
 
         # process render commands
         for render_command_idx in range(len(render_commands)):
@@ -932,7 +995,9 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
 
             render_bgl, render_pipeline = get_render_pipeline(
                 use_avg_buf,
-                render_cmd.shade_cell_function
+                render_cmd.shade_cell_function,
+                user_data_decl,
+                user_data_buffer is not None
             )
 
             # command buffer
@@ -959,21 +1024,29 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
             )
 
             rpass.set_pipeline(render_pipeline)
+
+            entries = [
+                wgpu.BindGroupEntry(
+                    binding=0,
+                    resource=wgpu.BufferBinding(
+                        buffer=render_uniform_buffer.buf
+                    )
+                ),
+                wgpu.BindGroupEntry(
+                    binding=1,
+                    resource=render_grid_view
+                ),
+            ]
+            if user_data_buffer:
+                entries.append(wgpu.BindGroupEntry(
+                    binding=2,
+                    resource=user_data_buffer.buf
+                ))
             rpass.set_bind_group(0, device.create_bind_group(
                 layout=render_bgl,
-                entries=[
-                    wgpu.BindGroupEntry(
-                        binding=0,
-                        resource=wgpu.BufferBinding(
-                            buffer=render_uniform_buffer.buf
-                        )
-                    ),
-                    wgpu.BindGroupEntry(
-                        binding=1,
-                        resource=render_grid_view
-                    ),
-                ],
+                entries=entries
             ))
+
             rpass.draw(6, 1, 0, 0)
             rpass.end()
 
@@ -1103,7 +1176,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                         binding=2,
                         resource=linear_sampler
                     ),
-                ],
+                ]
             ))
             dpass.draw(6, 1, 0, 0)
             dpass.end()

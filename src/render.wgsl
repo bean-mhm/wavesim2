@@ -35,6 +35,9 @@ var<uniform> ubo: UniformBuf;
 @group(0) @binding(1)
 var render_grid: texture_storage_3d<[render-grid-format], read>;
 
+// the following will be replaced with declarations for user data
+// [user-data-decl]
+
 struct VsOut {
     @builtin(position) pos: vec4f,
     @location(0) uv: vec2f,

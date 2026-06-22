@@ -17,6 +17,9 @@ var input_grid: texture_storage_3d<rg32float, read>;
 @group(0) @binding(2)
 var output_grid: texture_storage_3d<rg32float, write>;
 
+// the following will be replaced with declarations for user data
+// [user-data-decl]
+
 const PI = 3.1415926535897932384626433832;
 const TAU = 6.283185307179586476925286766;
 const HALF_PI = 1.57079632679489661923132169163;
