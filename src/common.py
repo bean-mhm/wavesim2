@@ -501,11 +501,11 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     see https://github.com/bean-mhm/flim
     """
 
-    export_png_path: Path | None = None
+    export_path: Path | None = None
     """
-    optional path for exporting a PNG file.
-    NOTE: if you need to export a PNG sequence, you must manually format the
-    path (e.g. include the frame number) in your WaveSimParams.on_update
+    optional path for exporting an image file (e.g. PNG or JPEG).
+    NOTE: if you need to export an image sequence, you must manually format the
+    path (e.g. to include the frame number) in your WaveSimParams.on_update
     function.
     """
 

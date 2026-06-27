@@ -32,7 +32,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
         fov_degrees=70.
     ),
     apply_flim=True,
-    export_png_path=None
+    export_path=None
 )
 
 
@@ -404,7 +404,7 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
             fov_degrees=20.
         ),
         apply_flim=True,
-        export_png_path=None
+        export_path=None
     )
 
     return WaveSimOnUpdateReturn(

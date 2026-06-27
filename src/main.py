@@ -942,7 +942,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
 
             # don't waste time if we're not gonna display or export it
             if display_render_idx != render_command_idx \
-                    and render_cmd.export_png_path is None:
+                    and render_cmd.export_path is None:
                 continue
 
             # resize render target if it's not large enough
@@ -1061,8 +1061,8 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
             rpass.draw(6, 1, 0, 0)
             rpass.end()
 
-            # export to PNG if needed
-            if render_cmd.export_png_path:
+            # export to image file if needed
+            if render_cmd.export_path:
                 n_bytes = (
                     render_target.width
                     * render_target.height
@@ -1104,17 +1104,28 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                 )
                 cpu_visible_buf.unmap()
 
-                # reinterpret as a numpy.ndarray and crop to render resolution
+                # reinterpret as a numpy.ndarray, crop to render resolution, and
+                # convert from RGBA to RGB.
                 pixels = np.ndarray(
                     (render_target.height, render_target.width, 4),
                     dtype=np.uint8,
                     buffer=buf_copy
-                )[0:render_cmd.res[1], 0:render_cmd.res[0]]
+                )[0:render_cmd.res[1], 0:render_cmd.res[0], :3]
 
-                # export PNG
-                Image.fromarray(pixels, 'RGBA').save(
-                    render_cmd.export_png_path
-                )
+                # export
+                if (
+                    str(render_cmd.export_path).lower().endswith(".jpg")
+                    or str(render_cmd.export_path).lower().endswith(".jpeg")
+                ):
+                    Image.fromarray(pixels, "RGB").save(
+                        render_cmd.export_path,
+                        subsampling=0,
+                        quality=100
+                    )
+                else:
+                    Image.fromarray(pixels, "RGB").save(
+                        render_cmd.export_path
+                    )
 
             # display pass
 
