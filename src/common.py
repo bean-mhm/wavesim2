@@ -1136,6 +1136,10 @@ def asymmetric_sign(v: float) -> float:
     return 1. if v >= 0. else -1.
 
 
+def make_divisible_by(n: int, divisor: int) -> int:
+    return (n + divisor - 1) // divisor * divisor
+
+
 def dict_remove_n_oldest(d: dict, n: int):
     """remove the first n entries from a dict (oldest by insertion order)"""
     keys = list(d.keys())[:n]
