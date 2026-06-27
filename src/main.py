@@ -50,13 +50,17 @@ def prepare_render_target(min_res: tuple[int, int]):
     if render_target is not None:
         old_size = deepcopy(render_target.size)
 
+    # the width must be divisible by 64 because bytes_per_row must be divisible
+    # by 256 when copying the pixels to a buffer for readback (e.g. when
+    # exporting a frame).
+    new_size = (
+        make_divisible_by(max(old_size[0], min_res[0]), 64),
+        max(old_size[1], min_res[1])
+    )
+
     render_target = device.create_texture(
         label="render target",
-        size=(
-            max(old_size[0], min_res[0]),
-            max(old_size[1], min_res[1]),
-            1
-        ),
+        size=(*new_size, 1),
         format=wgpu.TextureFormat.rgba8unorm,
         usage=(
             wgpu.TextureUsage.RENDER_ATTACHMENT |
@@ -198,7 +202,7 @@ def main():
     global device
 
     canvas = RenderCanvas(
-        size=(1280, 720),
+        size=(960, 540),
         title=WINDOW_TITLE,
         update_mode="fastest",
         vsync=True,
@@ -1076,15 +1080,17 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                     ["cpu_visible_buf"],
                     [wgpu.BufferUsage.MAP_READ | wgpu.BufferUsage.COPY_DST],
                     [n_bytes],
-                )
+                )[0]
 
                 # add command to copy from render target to staging buffer
                 cmd_encoder.copy_texture_to_buffer(
                     wgpu.TexelCopyTextureInfo(texture=render_target),
                     wgpu.TexelCopyBufferInfo(
                         buffer=cpu_visible_buf,
-                        bytes_per_row=n_bytes_per_row
-                    )
+                        bytes_per_row=n_bytes_per_row,
+                        rows_per_image=render_target.height
+                    ),
+                    copy_size=render_target.size
                 )
 
                 # submit command buffer
@@ -1103,7 +1109,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                     (render_target.height, render_target.width, 4),
                     dtype=np.uint8,
                     buffer=buf_copy
-                )[0:render_cmd.res[1], 0:render_cmd.res[1]]
+                )[0:render_cmd.res[1], 0:render_cmd.res[0]]
 
                 # export PNG
                 Image.fromarray(pixels, 'RGBA').save(
