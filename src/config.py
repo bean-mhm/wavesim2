@@ -218,25 +218,22 @@ def sim_on_update_cpu_readback(
     state: WaveSimState,
     readback_function: WaveSimReadbackFunction
 ) -> WaveSimOnUpdateReturn:
-    # skip odd iterations
-    if state.iter % 2 != 0:
-        return WaveSimOnUpdateReturn()
-
-    # read back the rightmost column of the grid to the CPU as a numpy.ndarray
-    read_averaging_grid = True
-    rightmost_column = readback_function(
-        Aabb(
-            pmin=(-1, 0, 0),
-            pmax=(-1, -1, 0)
-        ),
-        read_averaging_grid
-    )
-
-    # reshape from (1, N, 1) to (N,)
-    rightmost_column = rightmost_column[0, :, 0]
-
     # plot every 40 iterations
     if state.iter % 40 == 0:
+        # read back the rightmost column of the grid to the CPU as a numpy.ndarray
+        read_averaging_grid = True
+        rightmost_column = readback_function(
+            Aabb(
+                pmin=(-1, 0, 0),
+                pmax=(-1, -1, 0)
+            ),
+            read_averaging_grid
+        )
+
+        # reshape from (1, N, 1) to (N,)
+        rightmost_column = rightmost_column[0, :, 0]
+
+        # plot
         plot(
             rightmost_column[100:-100],
             "right-most column (wait for it)"
@@ -445,6 +442,7 @@ fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
     user_data=None,
     averaging=False,
     averaging_time_constant=0.,
+    on_start=None,
     on_update=sim_on_update_basic
 )
 
@@ -596,6 +594,7 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     user_data=None,
     averaging=False,
     averaging_time_constant=0.,
+    on_start=None,
     on_update=sim_on_update_2d_lens
 )
 
@@ -678,6 +677,7 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     user_data=None,
     averaging=True,
     averaging_time_constant=1.,
+    on_start=None,
     on_update=sim_on_update_2d_slit
 )
 
@@ -776,6 +776,7 @@ pixels: array<f32, {speed_mask_n_pixels}>,
     user_data=speed_mask.data,
     averaging=True,
     averaging_time_constant=.002,
+    on_start=None,
     on_update=sim_on_update_2d_speed_mask
 )
 
@@ -839,6 +840,7 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     user_data=None,
     averaging=True,
     averaging_time_constant=1.,
+    on_start=None,
     on_update=sim_on_update_3d_planar_with_lens
 )
 
@@ -902,10 +904,11 @@ fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
     user_data=None,
     averaging=True,
     averaging_time_constant=.5,
+    on_start=None,
     on_update=sim_on_update_3d_hexagonal_diffraction
 )
 
 
 # choose which simulation to run from above
-selected_sim_params = sim14_send_user_data
+selected_sim_params = sim12_2d_double_slit
 selected_sim_limits = WaveSimLimits(selected_sim_params)

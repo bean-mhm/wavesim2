@@ -742,6 +742,14 @@ class WaveSimParams:
     simulation time.
     """
 
+    on_start: Callable[
+        [WaveSimParams, WaveSimLimits],
+        None
+    ] | None
+    """
+    an optional user-provided callback called just before the simulation starts.
+    """
+
     on_update: Callable[
         [
             WaveSimParams,
@@ -865,6 +873,9 @@ class WaveSimLimits:
             ) * self.grid_dims[i]
             for i in range(len(p))
         ])
+
+    def recalculate(self, params: WaveSimParams):
+        self.__init__(params)
 
 
 def constant_initial_value_function(v: float) -> str:

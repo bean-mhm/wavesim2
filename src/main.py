@@ -218,6 +218,13 @@ def main():
 
     context, surface_format = retrieve_context()
 
+    # invoke the on_start() callback if provided
+    if selected_sim_params.on_start is not None:
+        selected_sim_params.on_start(
+            selected_sim_params,
+            selected_sim_limits
+        )
+
     # shaders
 
     user_data_decl: str = "// no user data"
@@ -1052,11 +1059,17 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
 
             # export to PNG if needed
             if render_cmd.export_png_path:
-                # prepare staging buffer
-                n_bytes = \
-                    render_target.width \
-                    * render_target.height \
+                n_bytes = (
+                    render_target.width
+                    * render_target.height
                     * 4 * 1  # n. color channels * n. bytes per channel
+                )
+                n_bytes_per_row = (
+                    render_target.width
+                    * 4 * 1  # n. color channels * n. bytes per channel
+                )
+
+                # prepare staging buffer
                 cpu_visible_buf = prepare_buffers(
                     device,
                     [cpu_visible_buf],
@@ -1068,7 +1081,10 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                 # add command to copy from render target to staging buffer
                 cmd_encoder.copy_texture_to_buffer(
                     wgpu.TexelCopyTextureInfo(texture=render_target),
-                    wgpu.TexelCopyBufferInfo(buffer=cpu_visible_buf)
+                    wgpu.TexelCopyBufferInfo(
+                        buffer=cpu_visible_buf,
+                        bytes_per_row=n_bytes_per_row
+                    )
                 )
 
                 # submit command buffer
