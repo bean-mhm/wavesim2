@@ -1120,7 +1120,7 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                     Image.fromarray(pixels, "RGB").save(
                         render_cmd.export_path,
                         subsampling=0,
-                        quality=100
+                        quality=95
                     )
                 else:
                     Image.fromarray(pixels, "RGB").save(
