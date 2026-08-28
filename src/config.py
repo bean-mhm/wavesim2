@@ -294,22 +294,23 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
     )
 
 
-def sim_on_update_3d_planar_with_lens(
+def sim_on_update_3d_lens_export_jpg(
     params: WaveSimParams,
     limits: WaveSimLimits,
     state: WaveSimState,
     readback_function: WaveSimReadbackFunction
 ) -> WaveSimOnUpdateReturn:
     render_cmd = basic_render_cmd.__replace__(
+        res=(2160, 1080),
         cam=CameraState(
             pos=(
-                .07 * np.cos(2. * np.pi * .12 * state.wall_time),
-                -.68,
-                .01 * np.sin(2. * np.pi * .284 * state.wall_time),
+                1.1 * np.cos(2. * np.pi * .023 * state.wall_time),
+                1.1 * np.sin(2. * np.pi * .023 * state.wall_time),
+                .01 * np.sin(2. * np.pi * .0974 * state.wall_time),
             ),
             lookat=(0., 0., 0.),
             world_up=(0., 0., 1.),
-            fov_degrees=60.
+            fov_degrees=50.
         ),
         shade_cell_function="""
 fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
@@ -342,9 +343,17 @@ fn shade_cell(icoord: vec3i, v: f32) -> vec3f {
         """
     )
 
+    RENDER_EVERY_N_FRAMES: int = 10
+    should_render: bool = (state.iter % RENDER_EVERY_N_FRAMES == 0)
+
+    EXPORT_DIR = Path("~/Desktop/wavesim2-frames/").expanduser()
+    if should_render:
+        i: int = state.iter // RENDER_EVERY_N_FRAMES
+        render_cmd.export_path = EXPORT_DIR / f"frame{i:05}.jpg"
+
     return WaveSimOnUpdateReturn(
-        # render every 3 iterations
-        render_commands=[render_cmd] if state.iter % 3 == 0 else [],
+        # render every N iterations
+        render_commands=[render_cmd] if should_render else [],
         display_render_idx=0,
         new_user_data=None,
         should_stop=False
@@ -781,8 +790,9 @@ pixels: array<f32, {speed_mask_n_pixels}>,
 )
 
 
-# 3D simulation with a planar wave source and a spherical lens
-sim15_3d_planar_with_lens = WaveSimParams(
+# 3D simulation with a planar wave source and a spherical lens, frames exported
+# as JPEG image files.
+sim15_3d_lens_export_jpg = WaveSimParams(
     grid_res=(400, 200, 200),
     cell_size=.003,
     wave_speed=.05,
@@ -839,76 +849,12 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
     user_data_fields=None,
     user_data=None,
     averaging=True,
-    averaging_time_constant=1.,
+    averaging_time_constant=.1,
     on_start=None,
-    on_update=sim_on_update_3d_planar_with_lens
-)
-
-
-# 3D point source diffracting through a hexagonal hole
-sim16_3d_hexagonal_diffraction = WaveSimParams(
-    grid_res=(1000, 150, 150),
-    cell_size=.004,
-    wave_speed=.5,
-    remove_reflections=True,
-    timestep=-.7,
-    wgsl_common_header="""
-fn hexagon_sdf(p: vec2f, radius: f32) -> f32 {
-    const k = vec3f(-sqrt(3.) / 2., .5, 1. / sqrt(3.));
-
-    var p2 = abs(p);
-    p2 -= 2. * min(dot(k.xy, p2), 0.) * k.xy;
-    p2 -= vec2f(
-        clamp(p2.x, -k.z * radius, k.z * radius),
-        radius
-    );
-
-    return length(p2) * sign(p2.y);
-}
-
-fn wall_sdf(p: vec3f) -> f32 {
-    return max(
-        abs(p.x + 1.75) - .005,
-        -hexagon_sdf(p.yz, .23)
-    );
-}
-    """,
-    initial_value_function=constant_initial_value_function(0.),
-    update_value_function="""
-fn update_value(icoord: vec3i, v: WaveValue) -> f32 {
-    let coord = icoord_to_world(icoord);
-    if (icoord.x != 50) {
-        return v.curr;
-    }
-    if (any(abs(coord.yz) > vec2f(.25, .25))) {
-        return v.curr;
-    }
-
-    let v_new = 2.2 * sin(TAU * ubo.time * .9 * MAX_FREQ);
-    return mix(
-        v.curr,
-        v_new,
-        remap01(ubo.time, 0., 4.) * remap01(ubo.time, 30., 26.)
-    );
-}
-    """,
-    speed_fac_function="""
-fn speed_fac(icoord: vec3i, v: WaveValue) -> f32 {
-    let coord = icoord_to_world(icoord);
-    let signed_dist = wall_sdf(coord);
-    return remap01(signed_dist, -.004, .004);
-}
-    """,
-    damp_fac_function=constant_damp_fac_function(.95),
-    user_data_fields=None,
-    user_data=None,
-    averaging=True,
-    averaging_time_constant=.5,
-    on_start=None,
-    on_update=sim_on_update_3d_hexagonal_diffraction
+    on_update=sim_on_update_3d_lens_export_jpg
 )
 
 
 # choose which simulation to run from above
-selected_sim_params = sim12_2d_double_slit
+selected_sim_params = sim15_3d_lens_export_jpg
 selected_sim_limits = WaveSimLimits(selected_sim_params)
