@@ -1113,6 +1113,13 @@ const SRGB_SURFACE = {str("srgb" in surface_format.lower()).lower()};
                 )[0:render_cmd.res[1], 0:render_cmd.res[0], :3]
 
                 # export
+                try:
+                    Path(render_cmd.export_path).parent.mkdir(
+                        parents=True,
+                        exist_ok=True
+                    )
+                except:
+                    pass
                 if (
                     str(render_cmd.export_path).lower().endswith(".jpg")
                     or str(render_cmd.export_path).lower().endswith(".jpeg")
