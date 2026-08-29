@@ -856,5 +856,5 @@ fn damp_fac(icoord: vec3i, v: WaveValue) -> f32 {
 
 
 # choose which simulation to run from above
-selected_sim_params = sim15_3d_lens_export_jpg
+selected_sim_params = sim10_2d_lens_smooth_damping
 selected_sim_limits = WaveSimLimits(selected_sim_params)
