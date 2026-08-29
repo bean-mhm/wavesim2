@@ -22,6 +22,8 @@ It's written in Python and comes with:
 
 ![A 3D planar wave passing through a spherical lens](assets/3d-lens.gif)
 
+![A 2D planar wave passing through a biconvex lens](assets/2d-lens.jpg)
+
 # Running
 
 wavesim2 uses [uv](https://github.com/astral-sh/uv) for package and project
